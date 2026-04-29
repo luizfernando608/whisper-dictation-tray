@@ -1,0 +1,15 @@
+{
+  "hotkey": "Ctrl+Shift+H",
+  "language": "pt",
+  "model_size": "small",
+  "compute_type": "int8",
+  "sample_rate": 16000,
+  "input_device": null,
+  "max_record_seconds": 120,
+  "beam_size": 1,
+  "vad_min_silence_ms": 400,
+  "insert_mode": "paste",
+  "restore_clipboard": true,
+  "typing_interval_ms": 4,
+  "cpu_threads": 0
+}
