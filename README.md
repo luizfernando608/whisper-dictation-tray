@@ -1,15 +1,16 @@
-# Local Whisper Dictation
+# Whisper Dictation Tray
 
-Aplicativo local para Windows que transforma fala em texto usando Whisper na CPU e insere automaticamente a transcricao no campo ativo.
+Aplicativo para Windows que transforma fala em texto usando Groq Whisper por padrao e insere automaticamente a transcricao no campo ativo.
 
-Ele foi feito para substituir o fluxo do `Win + H` por um ditado local, acionado por atalho global e sem depender de API externa.
+Ele foi feito para substituir o fluxo do `Win + H` por um ditado acionado por atalho global. Se a API da Groq ou a internet falhar, o app usa `faster-whisper` local como fallback.
 
 ## Recursos
 
 - Atalho global configuravel.
 - Icone na bandeja do sistema.
 - Gravacao do microfone local.
-- Transcricao local com `faster-whisper`.
+- Transcricao primaria com Groq `whisper-large-v3`.
+- Fallback local com `faster-whisper`.
 - Insercao automatica do texto por colagem ou digitacao.
 - Configuracao simples por `config.json`.
 
@@ -23,7 +24,13 @@ cd C:\Users\MEUCOMPUTADOR\Documents\whisper-dictation-tray
 .\scripts\install.ps1
 ```
 
-3. Inicie o app:
+3. Crie um `.env` na raiz do projeto com sua chave da Groq:
+
+```text
+GROQ_API_KEY=sua_chave_aqui
+```
+
+4. Inicie o app:
 
 ```powershell
 .\scripts\run.ps1
@@ -43,17 +50,31 @@ Campos principais:
 
 - `hotkey`: atalho global.
 - `language`: idioma fixo. Para portugues, use `pt`.
-- `model_size`: modelo Whisper local. Padrao: `small`.
-- `compute_type`: em CPU, use `int8`.
+- `transcription_provider`: `groq` ou `local`. Padrao: `groq`.
+- `groq_model`: modelo da Groq. Padrao: `whisper-large-v3`.
+- `groq_api_key_env`: nome da variavel de ambiente com a chave. Padrao: `GROQ_API_KEY`.
+- `model_size`: modelo Whisper local usado no fallback. Padrao: `small`.
+- `compute_type`: em CPU local, use `int8`.
 - `input_device`: nome parcial do microfone ou `null` para o padrao do sistema.
 - `insert_mode`: `paste` ou `type`.
 - `cpu_threads`: `0` para deixar o runtime decidir.
 
 Depois de editar o arquivo, use `Recarregar configuracao` no menu da bandeja ou reinicie o app.
 
-## Modelos
+## Provedor de Transcricao
 
-O app usa `faster-whisper` em CPU:
+O app usa Groq primeiro:
+
+```json
+{
+  "transcription_provider": "groq",
+  "groq_model": "whisper-large-v3",
+  "groq_api_key_env": "GROQ_API_KEY",
+  "language": "pt"
+}
+```
+
+Se a Groq falhar, ele cai automaticamente para `faster-whisper` em CPU:
 
 ```json
 {
@@ -69,7 +90,7 @@ Modelos recomendados:
 - `small`: melhor equilibrio para ditado local em CPU.
 - `medium`: mais preciso, mas mais lento.
 
-Na primeira execucao de um modelo ainda nao baixado, o `faster-whisper` pode fazer download dos pesos do modelo. A transcricao continua sendo executada localmente.
+Na primeira execucao de um modelo local ainda nao baixado, o `faster-whisper` pode fazer download dos pesos do modelo. O fallback continua sendo executado localmente.
 
 ## Selecionar Microfone
 
@@ -101,12 +122,13 @@ C:\Users\MEUCOMPUTADOR\Documents\whisper-dictation-tray\scripts\run.ps1
 - `src/whisper_dictation/app.py`: orquestracao, tray e fluxo principal.
 - `src/whisper_dictation/win32_hotkey.py`: hotkey global nativo no Windows.
 - `src/whisper_dictation/audio.py`: captura do microfone.
-- `src/whisper_dictation/transcription.py`: integracao com `faster-whisper`.
+- `src/whisper_dictation/transcription.py`: integracao com Groq e fallback `faster-whisper`.
 - `src/whisper_dictation/text_inserter.py`: colagem ou digitacao no app ativo.
 
 ## Observacoes
 
-- Nao usa chave de API para transcrever.
+- A chave da Groq deve ficar no `.env`, que nao deve ser versionado.
+- A transcricao primaria envia audio para a API da Groq; o fallback local nao envia audio para API externa.
 - `Win + H` pertence ao Windows; este app usa outro atalho.
 - Apps executados como administrador podem bloquear insercao de texto se este app nao estiver no mesmo nivel de permissao.
 - `insert_mode = paste` e mais rapido, mas usa temporariamente a area de transferencia.

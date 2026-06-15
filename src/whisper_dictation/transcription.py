@@ -19,14 +19,63 @@ class WhisperTranscriber:
         self.config = config
         self.temp_root = temp_root
         self.logger = logger
-        self._model = None
+        self._groq_client = None
+        self._local_model = None
 
     def transcribe(self, audio: CapturedAudio) -> str:
-        if audio.samples.size == 0:
+        if audio.samples.size == 0 or _is_effectively_silent(audio.samples):
             return ""
 
-        model = self._get_model()
         wav_path = self._write_temp_wav(audio)
+        try:
+            if self.config.transcription_provider == "groq":
+                try:
+                    return self._transcribe_with_groq(wav_path)
+                except Exception as exc:
+                    self.logger.warning(
+                        "Groq transcription failed; falling back to faster-whisper: %s",
+                        exc,
+                        exc_info=True,
+                    )
+            return self._transcribe_with_local_model(wav_path)
+        finally:
+            wav_path.unlink(missing_ok=True)
+
+    def _transcribe_with_groq(self, wav_path: Path) -> str:
+        api_key = os.environ.get(self.config.groq_api_key_env)
+        if not api_key:
+            raise RuntimeError(f"{self.config.groq_api_key_env} is not set")
+
+        client = self._get_groq_client(api_key)
+        with wav_path.open("rb") as audio_file:
+            transcription = client.audio.transcriptions.create(
+                file=audio_file,
+                model=self.config.groq_model,
+                language=self.config.language,
+                response_format="json",
+                temperature=0.0,
+            )
+
+        text = _normalize_text(str(getattr(transcription, "text", "") or ""))
+        self.logger.info(
+            "Groq transcription finished model=%s text_length=%s",
+            self.config.groq_model,
+            len(text),
+        )
+        return text
+
+    def _get_groq_client(self, api_key: str):
+        if self._groq_client is not None:
+            return self._groq_client
+
+        from groq import Groq
+
+        self.logger.info("Initializing Groq transcription client model=%s", self.config.groq_model)
+        self._groq_client = Groq(api_key=api_key, timeout=self.config.groq_timeout_seconds)
+        return self._groq_client
+
+    def _transcribe_with_local_model(self, wav_path: Path) -> str:
+        model = self._get_local_model()
         try:
             segments, info = model.transcribe(
                 str(wav_path),
@@ -39,18 +88,19 @@ class WhisperTranscriber:
             collected = [segment.text.strip() for segment in segments if segment.text.strip()]
             text = _normalize_text(" ".join(collected))
             self.logger.info(
-                "Transcription finished language=%s probability=%.3f text_length=%s",
+                "Local transcription finished language=%s probability=%.3f text_length=%s",
                 getattr(info, "language", self.config.language),
                 float(getattr(info, "language_probability", 0.0)),
                 len(text),
             )
             return text
-        finally:
-            wav_path.unlink(missing_ok=True)
+        except Exception:
+            self.logger.exception("Local faster-whisper transcription failed")
+            raise
 
-    def _get_model(self):
-        if self._model is not None:
-            return self._model
+    def _get_local_model(self):
+        if self._local_model is not None:
+            return self._local_model
 
         if self.config.cpu_threads > 0:
             os.environ["OMP_NUM_THREADS"] = str(self.config.cpu_threads)
@@ -71,8 +121,8 @@ class WhisperTranscriber:
             self.config.compute_type,
             self.config.cpu_threads or "<default>",
         )
-        self._model = WhisperModel(self.config.model_size, **kwargs)
-        return self._model
+        self._local_model = WhisperModel(self.config.model_size, **kwargs)
+        return self._local_model
 
     def _write_temp_wav(self, audio: CapturedAudio) -> Path:
         fd, raw_path = tempfile.mkstemp(prefix="dictation_", suffix=".wav", dir=self.temp_root)
@@ -95,3 +145,6 @@ def _normalize_text(text: str) -> str:
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
     return text
 
+
+def _is_effectively_silent(samples: np.ndarray) -> bool:
+    return float(np.max(np.abs(samples))) <= 1e-6

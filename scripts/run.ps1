@@ -19,4 +19,4 @@ if ($ExistingProcess) {
     return
 }
 
-Start-Process -FilePath $Pythonw -ArgumentList "`"$MainFile`"" -WorkingDirectory $ProjectRoot
+Start-Process -FilePath $Pythonw -ArgumentList "`"$MainFile`"" -WorkingDirectory $ProjectRoot -WindowStyle Hidden

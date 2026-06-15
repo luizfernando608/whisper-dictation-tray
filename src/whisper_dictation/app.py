@@ -14,7 +14,7 @@ from pystray import Menu, MenuItem
 from whisper_dictation.audio import AudioRecorder, CapturedAudio, list_input_devices
 from whisper_dictation.logging_utils import configure_logging
 from whisper_dictation.overlay import RecordingOverlay
-from whisper_dictation.settings import AppConfig, config_path, logs_dir, temp_dir
+from whisper_dictation.settings import AppConfig, config_path, load_env_file, logs_dir, temp_dir
 from whisper_dictation.text_inserter import TextInserter
 from whisper_dictation.transcription import WhisperTranscriber
 from whisper_dictation.win32_hotkey import GlobalHotkeyManager
@@ -30,6 +30,7 @@ class AppState(StrEnum):
 class DictationApp:
     def __init__(self, project_root: Path) -> None:
         self.project_root = project_root
+        load_env_file(project_root)
         self.config_path = config_path(project_root)
         self.log_dir = logs_dir(project_root)
         self.temp_root = temp_dir(project_root)
