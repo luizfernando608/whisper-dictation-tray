@@ -4,7 +4,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$ProjectRoot = Split-Path -Parent $PSScriptRoot
+$ProjectRoot = $PSScriptRoot
 $VenvPath = Join-Path $ProjectRoot ".venv"
 
 Write-Host "--- Whisper Dictation Tray: Instalação ---" -ForegroundColor Cyan
@@ -85,3 +85,4 @@ Write-Host "Próximos passos:"
 Write-Host "1. Edite o arquivo .env e coloque sua GROQ_API_KEY (opcional)."
 Write-Host "2. Inicie o app executando: .\scripts\run.ps1 (ou apenas reinicie o computador)"
 Write-Host ""
+te-Host ""

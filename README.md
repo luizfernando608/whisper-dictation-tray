@@ -17,7 +17,7 @@ Ele substitui o fluxo do `Win + H` por um ditado acionado por atalho global alta
 2. Abra o terminal (PowerShell) na pasta do projeto e rode o script de instalação:
 
 ```powershell
-.\scripts\install.ps1
+.\install.ps1
 ```
 
 3. Crie um arquivo `.env` na raiz do projeto (ou renomeie o `.env.example`) com sua chave da Groq:
@@ -33,7 +33,7 @@ GROQ_API_KEY=gsk_sua_chave_aqui
 1. Inicie o app:
 
 ```powershell
-.\scripts\run.ps1
+.\run.ps1
 ```
 
 O ícone aparecerá na bandeja do sistema (tray). O atalho padrão é `Ctrl + Shift + H`.
