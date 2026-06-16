@@ -146,11 +146,14 @@ class DictationApp:
             self._last_transcript = text
             self._overlay.hide()
             inserted = self.inserter.insert_text(text)
+            copied = self._copy_transcript_to_clipboard(text)
             if inserted:
-                self._set_state(AppState.IDLE, "Texto inserido")
+                status = "Texto inserido e copiado" if copied else "Texto inserido"
+                self._set_state(AppState.IDLE, status)
                 self._notify("Whisper Dictation", self._truncate_notification(text))
             else:
-                self._set_state(AppState.IDLE, "Texto transcrito")
+                status = "Texto transcrito e copiado" if copied else "Texto transcrito"
+                self._set_state(AppState.IDLE, status)
         except Exception as exc:
             self.logger.exception("Unhandled transcription failure")
             self._overlay.hide()
@@ -212,8 +215,16 @@ class DictationApp:
         del icon, item
         if not self._last_transcript:
             return
-        pyperclip.copy(self._last_transcript)
+        self._copy_transcript_to_clipboard(self._last_transcript)
         self._notify("Whisper Dictation", "Última transcrição copiada.")
+
+    def _copy_transcript_to_clipboard(self, text: str) -> bool:
+        try:
+            pyperclip.copy(text)
+        except pyperclip.PyperclipException:
+            self.logger.exception("Could not copy transcript to clipboard.")
+            return False
+        return True
 
     def _open_config(self, icon: pystray.Icon, item: MenuItem) -> None:
         del icon, item

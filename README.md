@@ -12,6 +12,7 @@ Ele foi feito para substituir o fluxo do `Win + H` por um ditado acionado por at
 - Transcricao primaria com Groq `whisper-large-v3`.
 - Fallback local com `faster-whisper`.
 - Insercao automatica do texto por colagem ou digitacao.
+- Copia automatica da transcricao final para a area de transferencia.
 - Configuracao simples por `config.json`.
 
 ## Como Usar
@@ -40,7 +41,7 @@ O icone aparece na bandeja. O atalho padrao e `Ctrl + Shift + H`.
 
 - Pressione uma vez para comecar a gravar.
 - Pressione de novo para parar.
-- O app transcreve e insere o texto na janela que estiver com foco.
+- O app transcreve, insere o texto na janela que estiver com foco e deixa a transcricao no clipboard.
 
 ## Configuracao
 
