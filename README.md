@@ -55,9 +55,9 @@ Após editar, clique com o botão direito no ícone da bandeja e selecione **"Re
 
 ## Inicialização com o Windows
 
-Para que o app inicie sozinho:
-1. Pressione `Win + R`, digite `shell:startup` e aperte Enter.
-2. Crie um atalho para o arquivo `scripts\run.ps1` nesta pasta.
+O script de instalação (`install.ps1`) já configura automaticamente um atalho na pasta de inicialização do Windows (`shell:startup`). Portanto, o aplicativo iniciará sozinho sempre que você ligar o computador.
+
+Se quiser desativar isso, basta abrir a pasta de inicialização (pressione `Win + R`, digite `shell:startup` e aperte Enter) e excluir o atalho do WhisperDictation.
 
 ## Estrutura do Projeto
 

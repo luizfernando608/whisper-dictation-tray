@@ -67,9 +67,21 @@ if (-not (Test-Path $EnvFile) -and (Test-Path $EnvExample)) {
     Write-Host "[INFO] Arquivo .env criado a partir do .env.example." -ForegroundColor Cyan
 }
 
+# 6. Inicialização com o Windows (Startup)
+Write-Host "Configurando inicialização automática com o Windows..." -ForegroundColor Cyan
+$StartupFolder = [Environment]::GetFolderPath("Startup")
+$ShortcutPath = Join-Path $StartupFolder "WhisperDictation.lnk"
+$WshShell = New-Object -ComObject WScript.Shell
+$Shortcut = $WshShell.CreateShortcut($ShortcutPath)
+$Shortcut.TargetPath = "powershell.exe"
+$Shortcut.Arguments = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ProjectRoot\scripts\run.ps1`""
+$Shortcut.WorkingDirectory = $ProjectRoot
+$Shortcut.Save()
+Write-Host "[OK] Atalho de inicialização criado." -ForegroundColor Green
+
 Write-Host ""
 Write-Host "Instalação concluída com sucesso!" -ForegroundColor Green
 Write-Host "Próximos passos:"
 Write-Host "1. Edite o arquivo .env e coloque sua GROQ_API_KEY (opcional)."
-Write-Host "2. Inicie o app executando: .\scripts\run.ps1"
+Write-Host "2. Inicie o app executando: .\scripts\run.ps1 (ou apenas reinicie o computador)"
 Write-Host ""
