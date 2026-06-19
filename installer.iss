@@ -1,6 +1,6 @@
 [Setup]
 AppName=Whisper Dictation Tray
-AppVersion=1.0
+AppVersion=1.0.1
 DefaultDirName={localappdata}\WhisperDictation
 DefaultGroupName=Whisper Dictation
 UninstallDisplayIcon={app}\WhisperDictationTray.exe
