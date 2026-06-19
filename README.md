@@ -1,67 +1,25 @@
 # Whisper Dictation Tray
 
-Aplicativo para Windows que transforma fala em texto usando Groq Whisper (nuvem) ou `faster-whisper` (local) e insere automaticamente a transcrição no campo ativo.
+I originally built this because I was getting tired of manually typing out long prompts all day.
 
-Ele substitui o fluxo do `Win + H` por um ditado acionado por atalho global altamente configurável.
+It's a lightweight tray app that lets you dictate text anywhere on Windows using Whisper. It actually gets punctuation right and is way more accurate than the built-in Windows dictation.
 
-## Pré-requisitos
+## Getting Started
 
-1. **Python 3.10 ou superior**: Recomenda-se 3.11.
-2. **FFmpeg**: Necessário para o processamento de áudio (especialmente para o modo local).
-   - Instale via [winget](https://github.com/microsoft/winget-cli): `winget install ffmpeg`
-   - Ou via [Scoop](https://scoop.sh/): `scoop install ffmpeg`
+Grab the installer directly here: [**Download WhisperDictation_Installer.exe**](https://github.com/luizfernando608/whisper-dictation-tray/releases/latest/download/WhisperDictation_Installer.exe)
 
-## Instalação
+Run it, and the app will live in your system tray (near the clock).
 
-1. Clone ou baixe este repositório.
-2. Abra o terminal (PowerShell) na pasta do projeto e rode o script de instalação:
+## Usage
 
-```powershell
-.\install.ps1
-```
+1. Click inside any text box (ChatGPT, Word, Discord, whatever).
+2. Press `Ctrl + Shift + H` to start recording.
+3. Talk.
+4. Press `Ctrl + Shift + H` again to stop.
+5. Your text gets pasted automatically.
 
-3. Crie um arquivo `.env` na raiz do projeto (ou renomeie o `.env.example`) com sua chave da Groq:
+## Privacy (It runs locally)
 
-```text
-GROQ_API_KEY=gsk_sua_chave_aqui
-```
+Out of the box, this runs 100% offline using `faster-whisper`. Your audio never leaves your computer. 
 
-*Nota: Se você não fornecer uma chave, o app usará automaticamente o fallback local.*
-
-## Como Usar
-
-1. Inicie o app:
-
-```powershell
-.\run.ps1
-```
-
-O ícone aparecerá na bandeja do sistema (tray). O atalho padrão é `Ctrl + Shift + H`.
-
-- **Pressione uma vez**: Inicia a gravação (um círculo vermelho aparece no topo da tela).
-- **Pressione de novo**: Para a gravação.
-- O app transcreve o áudio, insere o texto na janela ativa e copia para a área de transferência.
-
-## Configuração
-
-Edite o arquivo `config.json` para ajustar o comportamento:
-
-- `hotkey`: Atalho global (ex: `Ctrl+Shift+H`, `Alt+H`).
-- `language`: Idioma (use `pt` para português).
-- `transcription_provider`: `groq` (rápido, precisa de internet) ou `local` (privado, roda no seu PC).
-- `insert_mode`: `paste` (mais rápido, via Ctrl+V) ou `type` (simula digitação).
-
-Após editar, clique com o botão direito no ícone da bandeja e selecione **"Recarregar configuração"**.
-
-## Inicialização com o Windows
-
-O script de instalação (`install.ps1`) já configura automaticamente um atalho na pasta de inicialização do Windows (`shell:startup`). Portanto, o aplicativo iniciará sozinho sempre que você ligar o computador.
-
-Se quiser desativar isso, basta abrir a pasta de inicialização (pressione `Win + R`, digite `shell:startup` e aperte Enter) e excluir o atalho do WhisperDictation.
-
-## Estrutura do Projeto
-
-- `main.py`: Ponto de entrada.
-- `src/whisper_dictation/`: Código fonte principal.
-- `logs/`: Logs de execução para diagnóstico.
-- `config.json`: Ajustes do usuário.
+If you want it to be ridiculously fast and don't mind using the cloud, you can right-click the tray icon, open the config, and drop in a Groq API key. But again, completely optional.
