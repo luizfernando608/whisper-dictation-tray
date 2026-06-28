@@ -15,6 +15,7 @@ from whisper_dictation.audio import AudioRecorder, CapturedAudio, list_input_dev
 from whisper_dictation.logging_utils import configure_logging
 from whisper_dictation.overlay import RecordingOverlay
 from whisper_dictation.settings import AppConfig, config_path, load_env_file, logs_dir, temp_dir
+from whisper_dictation.settings_window import open_settings_window
 from whisper_dictation.text_inserter import TextInserter
 from whisper_dictation.transcription import WhisperTranscriber
 from whisper_dictation.win32_hotkey import GlobalHotkeyManager
@@ -37,27 +38,12 @@ class DictationApp:
         self.logger = configure_logging(self.log_dir / "whisper_dictation.log")
 
         self.config = AppConfig.load(self.config_path)
-        self.recorder = AudioRecorder(
-            target_sample_rate=self.config.sample_rate,
-            input_device=self.config.input_device,
-            logger=self.logger,
-        )
-        self.transcriber = WhisperTranscriber(
-            config=self.config,
-            temp_root=self.temp_root,
-            logger=self.logger,
-        )
-        self.inserter = TextInserter(
-            mode=self.config.insert_mode,
-            restore_clipboard=self.config.restore_clipboard,
-            typing_interval_ms=self.config.typing_interval_ms,
-            logger=self.logger,
-        )
-        self.hotkey_manager = GlobalHotkeyManager(
-            hotkey=self.config.hotkey,
-            callback=self.toggle_recording,
-            logger=self.logger,
-        )
+        (
+            self.recorder,
+            self.transcriber,
+            self.inserter,
+            self.hotkey_manager,
+        ) = self._build_runtime_components(self.config)
 
         self._state = AppState.IDLE
         self._status_message = "Pronto"
@@ -80,6 +66,34 @@ class DictationApp:
         self.logger.info("Starting Whisper Dictation Tray")
         self.hotkey_manager.start()
         self.icon.run()
+
+    def _build_runtime_components(
+        self,
+        config: AppConfig,
+    ) -> tuple[AudioRecorder, WhisperTranscriber, TextInserter, GlobalHotkeyManager]:
+        return (
+            AudioRecorder(
+                target_sample_rate=config.sample_rate,
+                input_device=config.input_device,
+                logger=self.logger,
+            ),
+            WhisperTranscriber(
+                config=config,
+                temp_root=self.temp_root,
+                logger=self.logger,
+            ),
+            TextInserter(
+                mode=config.insert_mode,
+                restore_clipboard=config.restore_clipboard,
+                typing_interval_ms=config.typing_interval_ms,
+                logger=self.logger,
+            ),
+            GlobalHotkeyManager(
+                hotkey=config.hotkey,
+                callback=self.toggle_recording,
+                logger=self.logger,
+            ),
+        )
 
     def toggle_recording(self) -> None:
         with self._state_lock:
@@ -171,45 +185,70 @@ class DictationApp:
         if timer is not None:
             timer.cancel()
 
+    def _can_change_config(self, action: str) -> bool:
+        with self._state_lock:
+            state = self._state
+
+        if state == AppState.RECORDING:
+            self._notify("Whisper Dictation", f"Pare a gravação antes de {action}.")
+            return False
+        if state == AppState.TRANSCRIBING:
+            self._notify("Whisper Dictation", f"Espere a transcrição terminar antes de {action}.")
+            return False
+        return True
+
+    def _apply_config(self, config: AppConfig) -> None:
+        recorder, transcriber, inserter, hotkey_manager = self._build_runtime_components(config)
+        previous_hotkey_manager = self.hotkey_manager
+
+        previous_hotkey_manager.stop()
+        try:
+            hotkey_manager.start()
+        except Exception:
+            self.logger.exception("Failed to apply new runtime config; restoring previous hotkey.")
+            try:
+                previous_hotkey_manager.start()
+            except Exception:
+                self.logger.exception("Failed to restore previous hotkey after config apply error.")
+            raise
+
+        self.config = config
+        self.recorder = recorder
+        self.transcriber = transcriber
+        self.inserter = inserter
+        self.hotkey_manager = hotkey_manager
+
     def _reload_config(self, icon: pystray.Icon, item: MenuItem) -> None:
         del icon, item
-        with self._state_lock:
-            if self._state == AppState.RECORDING:
-                self._notify("Whisper Dictation", "Pare a gravação antes de recarregar a configuração.")
-                return
-            if self._state == AppState.TRANSCRIBING:
-                self._notify("Whisper Dictation", "Espere a transcrição terminar antes de recarregar.")
-                return
+        if not self._can_change_config("recarregar a configuração"):
+            return
 
         try:
-            self.hotkey_manager.stop()
-            self.config = AppConfig.load(self.config_path)
-            self.recorder = AudioRecorder(
-                target_sample_rate=self.config.sample_rate,
-                input_device=self.config.input_device,
-                logger=self.logger,
-            )
-            self.transcriber = WhisperTranscriber(
-                config=self.config,
-                temp_root=self.temp_root,
-                logger=self.logger,
-            )
-            self.inserter = TextInserter(
-                mode=self.config.insert_mode,
-                restore_clipboard=self.config.restore_clipboard,
-                typing_interval_ms=self.config.typing_interval_ms,
-                logger=self.logger,
-            )
-            self.hotkey_manager = GlobalHotkeyManager(
-                hotkey=self.config.hotkey,
-                callback=self.toggle_recording,
-                logger=self.logger,
-            )
-            self.hotkey_manager.start()
+            self._apply_config(AppConfig.load(self.config_path))
             self._set_state(AppState.IDLE, "Configuração recarregada")
             self._notify("Whisper Dictation", f"Novo atalho: {self.config.hotkey}")
         except Exception as exc:
             self._set_error(f"Falha ao recarregar config: {exc}")
+
+    def _open_settings(self, icon: pystray.Icon, item: MenuItem) -> None:
+        del icon, item
+        if not self._can_change_config("abrir as configurações"):
+            return
+        open_settings_window(self.config, self._save_settings)
+
+    def _save_settings(self, config: AppConfig) -> bool:
+        if not self._can_change_config("salvar as configurações"):
+            return False
+
+        try:
+            self._apply_config(config)
+            config.save(self.config_path)
+            self._set_state(AppState.IDLE, "Configurações salvas")
+            self._notify("Whisper Dictation", "Configurações atualizadas.")
+            return True
+        except Exception as exc:
+            self._set_error(f"Falha ao salvar configurações: {exc}")
+            return False
 
     def _copy_last_transcript(self, icon: pystray.Icon, item: MenuItem) -> None:
         del icon, item
@@ -286,6 +325,7 @@ class DictationApp:
                 self._copy_last_transcript,
                 enabled=lambda *_: bool(self._last_transcript),
             ),
+            MenuItem("Configurações...", self._open_settings),
             MenuItem("Abrir config.json", self._open_config),
             MenuItem("Recarregar configuração", self._reload_config),
             MenuItem("Listar microfones no log", self._log_input_devices),

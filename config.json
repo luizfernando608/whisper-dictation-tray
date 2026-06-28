@@ -1,6 +1,6 @@
 {
   "hotkey": "Ctrl+Shift+H",
-  "language": "pt",
+  "language": "auto",
   "transcription_provider": "groq",
   "groq_model": "whisper-large-v3",
   "groq_api_key_env": "GROQ_API_KEY",

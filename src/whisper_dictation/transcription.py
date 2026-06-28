@@ -47,19 +47,26 @@ class WhisperTranscriber:
             raise RuntimeError(f"{self.config.groq_api_key_env} is not set")
 
         client = self._get_groq_client(api_key)
+        language = _transcription_language(self.config.language)
+        request = {
+            "model": self.config.groq_model,
+            "response_format": "json",
+            "temperature": 0.0,
+        }
+        if language is not None:
+            request["language"] = language
+
         with wav_path.open("rb") as audio_file:
             transcription = client.audio.transcriptions.create(
                 file=audio_file,
-                model=self.config.groq_model,
-                language=self.config.language,
-                response_format="json",
-                temperature=0.0,
+                **request,
             )
 
         text = _normalize_text(str(getattr(transcription, "text", "") or ""))
         self.logger.info(
-            "Groq transcription finished model=%s text_length=%s",
+            "Groq transcription finished model=%s language=%s text_length=%s",
             self.config.groq_model,
+            language or "auto",
             len(text),
         )
         return text
@@ -76,10 +83,11 @@ class WhisperTranscriber:
 
     def _transcribe_with_local_model(self, wav_path: Path) -> str:
         model = self._get_local_model()
+        language = _transcription_language(self.config.language)
         try:
             segments, info = model.transcribe(
                 str(wav_path),
-                language=self.config.language,
+                language=language,
                 beam_size=self.config.beam_size,
                 condition_on_previous_text=False,
                 vad_filter=True,
@@ -89,7 +97,7 @@ class WhisperTranscriber:
             text = _normalize_text(" ".join(collected))
             self.logger.info(
                 "Local transcription finished language=%s probability=%.3f text_length=%s",
-                getattr(info, "language", self.config.language),
+                getattr(info, "language", language or "auto"),
                 float(getattr(info, "language_probability", 0.0)),
                 len(text),
             )
@@ -144,6 +152,11 @@ def _normalize_text(text: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
     return text
+
+
+def _transcription_language(language: str) -> str | None:
+    normalized = language.strip().lower()
+    return None if normalized in {"", "auto"} else normalized
 
 
 def _is_effectively_silent(samples: np.ndarray) -> bool:

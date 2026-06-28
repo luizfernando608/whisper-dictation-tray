@@ -31,7 +31,7 @@ class AudioRecorder:
     def __init__(
         self,
         target_sample_rate: int,
-        input_device: str | None,
+        input_device: int | str | None,
         logger: logging.Logger,
     ) -> None:
         self.target_sample_rate = target_sample_rate
@@ -151,4 +151,3 @@ def _resample_audio(samples: np.ndarray, source_rate: int, target_rate: int) -> 
     target_positions = np.linspace(0.0, duration, num=target_length, endpoint=False)
     resampled = np.interp(target_positions, source_positions, samples)
     return np.asarray(resampled, dtype=np.float32)
-

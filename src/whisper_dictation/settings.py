@@ -10,7 +10,7 @@ from typing import Any
 @dataclass(slots=True)
 class AppConfig:
     hotkey: str = "Ctrl+Shift+H"
-    language: str = "pt"
+    language: str = "auto"
     transcription_provider: str = "groq"
     groq_model: str = "whisper-large-v3"
     groq_api_key_env: str = "GROQ_API_KEY"
@@ -18,7 +18,7 @@ class AppConfig:
     model_size: str = "small"
     compute_type: str = "int8"
     sample_rate: int = 16000
-    input_device: str | None = None
+    input_device: int | str | None = None
     max_record_seconds: int = 120
     beam_size: int = 1
     vad_min_silence_ms: int = 400
@@ -34,7 +34,7 @@ class AppConfig:
             config.save(path)
             return config
 
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         return cls(**cls._sanitize(data))
 
     def save(self, path: Path) -> None:
@@ -67,12 +67,21 @@ class AppConfig:
         sanitized["cpu_threads"] = max(0, int(sanitized["cpu_threads"]))
         sanitized["groq_timeout_seconds"] = max(5.0, float(sanitized["groq_timeout_seconds"]))
         sanitized["hotkey"] = str(sanitized["hotkey"]).strip() or defaults["hotkey"]
-        sanitized["language"] = str(sanitized["language"]).strip() or defaults["language"]
+        sanitized["language"] = str(sanitized["language"]).strip().lower() or defaults["language"]
         sanitized["groq_model"] = str(sanitized["groq_model"]).strip() or defaults["groq_model"]
         sanitized["groq_api_key_env"] = str(sanitized["groq_api_key_env"]).strip() or defaults["groq_api_key_env"]
         sanitized["model_size"] = str(sanitized["model_size"]).strip() or defaults["model_size"]
         sanitized["compute_type"] = str(sanitized["compute_type"]).strip() or defaults["compute_type"]
-        sanitized["input_device"] = sanitized["input_device"] or None
+        input_device = sanitized["input_device"]
+        if input_device is None:
+            sanitized["input_device"] = None
+        elif isinstance(input_device, int):
+            sanitized["input_device"] = max(0, input_device)
+        else:
+            input_device_text = str(input_device).strip()
+            sanitized["input_device"] = (
+                int(input_device_text) if input_device_text.isdigit() else input_device_text or None
+            )
         sanitized["restore_clipboard"] = bool(sanitized["restore_clipboard"])
         return sanitized
 
