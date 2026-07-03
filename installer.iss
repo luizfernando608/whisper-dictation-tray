@@ -1,7 +1,11 @@
+#ifndef AppVersion
+  #define AppVersion "1.2.0"
+#endif
+
 [Setup]
 AppId=Whisper Dictation Tray
 AppName=Whisper Dictation Tray
-AppVersion=1.1.0
+AppVersion={#AppVersion}
 AppPublisher=Whisper Dictation Tray
 DefaultDirName={localappdata}\WhisperDictation
 DefaultGroupName=Whisper Dictation
@@ -29,6 +33,8 @@ Source: "dist\WhisperDictationTray\*"; DestDir: "{app}"; Flags: ignoreversion re
 
 [Icons]
 Name: "{group}\Whisper Dictation"; Filename: "{app}\WhisperDictationTray.exe"
+Name: "{group}\Configurações do Whisper Dictation"; Filename: "{app}\WhisperDictationTray.exe"; Parameters: "--settings"
+Name: "{userdesktop}\Whisper Dictation — Configurações"; Filename: "{app}\WhisperDictationTray.exe"; Parameters: "--settings"
 Name: "{userstartup}\Whisper Dictation"; Filename: "{app}\WhisperDictationTray.exe"
 
 [Run]

@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from whisper_dictation.providers import PROVIDERS
+
 
 @dataclass(slots=True)
 class AppConfig:
@@ -13,6 +15,8 @@ class AppConfig:
     language: str = "auto"
     transcription_provider: str = "groq"
     groq_model: str = "whisper-large-v3"
+    openai_model: str = "gpt-4o-transcribe"
+    gemini_model: str = "gemini-2.5-flash"
     groq_api_key_env: str = "GROQ_API_KEY"
     groq_timeout_seconds: float = 30.0
     model_size: str = "small"
@@ -52,11 +56,11 @@ class AppConfig:
                 sanitized[key] = data[key]
 
         sanitized["insert_mode"] = str(sanitized["insert_mode"]).strip()
-        sanitized["transcription_provider"] = str(sanitized["transcription_provider"]).strip()
+        sanitized["transcription_provider"] = str(sanitized["transcription_provider"]).strip().lower()
 
         if sanitized["insert_mode"] not in {"paste", "type"}:
             sanitized["insert_mode"] = defaults["insert_mode"]
-        if sanitized["transcription_provider"] not in {"groq", "local"}:
+        if sanitized["transcription_provider"] not in PROVIDERS:
             sanitized["transcription_provider"] = defaults["transcription_provider"]
 
         sanitized["sample_rate"] = max(8000, int(sanitized["sample_rate"]))
@@ -69,6 +73,8 @@ class AppConfig:
         sanitized["hotkey"] = str(sanitized["hotkey"]).strip() or defaults["hotkey"]
         sanitized["language"] = str(sanitized["language"]).strip().lower() or defaults["language"]
         sanitized["groq_model"] = str(sanitized["groq_model"]).strip() or defaults["groq_model"]
+        sanitized["openai_model"] = str(sanitized["openai_model"]).strip() or defaults["openai_model"]
+        sanitized["gemini_model"] = str(sanitized["gemini_model"]).strip() or defaults["gemini_model"]
         sanitized["groq_api_key_env"] = str(sanitized["groq_api_key_env"]).strip() or defaults["groq_api_key_env"]
         sanitized["model_size"] = str(sanitized["model_size"]).strip() or defaults["model_size"]
         sanitized["compute_type"] = str(sanitized["compute_type"]).strip() or defaults["compute_type"]

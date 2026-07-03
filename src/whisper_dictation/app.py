@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import os
+import subprocess
+import sys
 import threading
 import time
 from enum import StrEnum
@@ -11,11 +12,19 @@ import pystray
 from PIL import Image, ImageDraw
 from pystray import Menu, MenuItem
 
-from whisper_dictation.audio import AudioRecorder, CapturedAudio, list_input_devices
+from whisper_dictation import updater
+from whisper_dictation._version import __version__
+from whisper_dictation.audio import AudioRecorder, CapturedAudio
 from whisper_dictation.logging_utils import configure_logging
 from whisper_dictation.overlay import RecordingOverlay
 from whisper_dictation.settings import AppConfig, config_path, load_env_file, logs_dir, temp_dir
-from whisper_dictation.settings_window import open_settings_window
+from whisper_dictation.single_instance import (
+    COPY_LAST_TRANSCRIPT,
+    OPEN_SETTINGS,
+    QUIT,
+    RELOAD_CONFIG,
+    SingleInstance,
+)
 from whisper_dictation.text_inserter import TextInserter
 from whisper_dictation.transcription import WhisperTranscriber
 from whisper_dictation.win32_hotkey import GlobalHotkeyManager
@@ -29,8 +38,17 @@ class AppState(StrEnum):
 
 
 class DictationApp:
-    def __init__(self, project_root: Path) -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        instance: SingleInstance | None = None,
+        open_settings_on_start: bool = False,
+    ) -> None:
         self.project_root = project_root
+        self._instance = instance
+        self._open_settings_on_start = open_settings_on_start
+        self._update_available: updater.UpdateInfo | None = None
+        self._settings_proc: subprocess.Popen | None = None
         load_env_file(project_root)
         self.config_path = config_path(project_root)
         self.log_dir = logs_dir(project_root)
@@ -62,9 +80,22 @@ class DictationApp:
             menu=self._build_menu(),
         )
 
+        if self._instance is not None:
+            self._instance.register(OPEN_SETTINGS, self._open_settings_now)
+            self._instance.register(RELOAD_CONFIG, self._reload_config_from_disk)
+            self._instance.register(COPY_LAST_TRANSCRIPT, self._copy_last_transcript_action)
+            self._instance.register(QUIT, self._shutdown_app)
+
     def run(self) -> None:
-        self.logger.info("Starting Whisper Dictation Tray")
+        self.logger.info("Starting Whisper Dictation Tray v%s", __version__)
         self.hotkey_manager.start()
+        if self._instance is not None:
+            self._instance.start_listener()
+        threading.Thread(
+            target=self._check_updates, name="StartupUpdateCheck", daemon=True
+        ).start()
+        if self._open_settings_on_start:
+            self._open_settings_now()
         self.icon.run()
 
     def _build_runtime_components(
@@ -218,40 +249,40 @@ class DictationApp:
         self.inserter = inserter
         self.hotkey_manager = hotkey_manager
 
-    def _reload_config(self, icon: pystray.Icon, item: MenuItem) -> None:
-        del icon, item
-        if not self._can_change_config("recarregar a configuração"):
-            return
-
-        try:
-            self._apply_config(AppConfig.load(self.config_path))
-            self._set_state(AppState.IDLE, "Configuração recarregada")
-            self._notify("Whisper Dictation", f"Novo atalho: {self.config.hotkey}")
-        except Exception as exc:
-            self._set_error(f"Falha ao recarregar config: {exc}")
-
     def _open_settings(self, icon: pystray.Icon, item: MenuItem) -> None:
         del icon, item
-        if not self._can_change_config("abrir as configurações"):
-            return
-        open_settings_window(self.config, self._save_settings)
+        self._open_settings_now()
 
-    def _save_settings(self, config: AppConfig) -> bool:
-        if not self._can_change_config("salvar as configurações"):
-            return False
-
+    def _open_settings_now(self) -> None:
+        # Run the settings UI in its own process so CustomTkinter owns a clean
+        # main thread — its dropdown popups deadlock off the main thread.
+        proc = self._settings_proc
+        if proc is not None and proc.poll() is None:
+            return  # already open
         try:
-            self._apply_config(config)
-            config.save(self.config_path)
-            self._set_state(AppState.IDLE, "Configurações salvas")
-            self._notify("Whisper Dictation", "Configurações atualizadas.")
-            return True
+            self._settings_proc = subprocess.Popen(
+                self._settings_ui_command(),
+                creationflags=0x08000000,  # CREATE_NO_WINDOW
+            )
         except Exception as exc:
-            self._set_error(f"Falha ao salvar configurações: {exc}")
-            return False
+            self._set_error(f"Falha ao abrir as configurações: {exc}")
 
-    def _copy_last_transcript(self, icon: pystray.Icon, item: MenuItem) -> None:
-        del icon, item
+    def _settings_ui_command(self) -> list[str]:
+        if getattr(sys, "frozen", False):
+            return [sys.executable, "--settings-ui"]
+        return [sys.executable, str(self.project_root / "main.py"), "--settings-ui"]
+
+    def _reload_config_from_disk(self) -> None:
+        if not self._can_change_config("aplicar as configurações"):
+            return
+        try:
+            self._apply_config(AppConfig.load(self.config_path))
+            self._set_state(AppState.IDLE, "Configurações aplicadas")
+            self._notify("Whisper Dictation", "Configurações atualizadas.")
+        except Exception as exc:
+            self._set_error(f"Falha ao aplicar configurações: {exc}")
+
+    def _copy_last_transcript_action(self) -> None:
         if not self._last_transcript:
             return
         self._copy_transcript_to_clipboard(self._last_transcript)
@@ -265,41 +296,63 @@ class DictationApp:
             return False
         return True
 
-    def _open_config(self, icon: pystray.Icon, item: MenuItem) -> None:
-        del icon, item
-        os.startfile(self.config_path)
-
-    def _open_logs(self, icon: pystray.Icon, item: MenuItem) -> None:
-        del icon, item
-        os.startfile(self.log_dir)
-
-    def _open_project_folder(self, icon: pystray.Icon, item: MenuItem) -> None:
-        del icon, item
-        os.startfile(self.project_root)
-
-    def _log_input_devices(self, icon: pystray.Icon, item: MenuItem) -> None:
-        del icon, item
-        devices = list_input_devices()
-        if not devices:
-            self.logger.warning("No input devices found")
-            self._notify("Whisper Dictation", "Nenhum microfone encontrado.")
-            return
-        for index, name, sample_rate in devices:
-            self.logger.info(
-                "Input device [%s] %s | default_sample_rate=%s",
-                index,
-                name,
-                sample_rate,
+    # ---------------------------- atualização ----------------------------
+    def _check_updates(self, notify_when_current: bool = False) -> None:
+        update = updater.check_for_update()
+        if update is not None:
+            self._update_available = update
+            try:
+                self.icon.update_menu()
+            except Exception:
+                self.logger.debug("Could not refresh tray menu after update check.")
+            self._notify(
+                "Whisper Dictation",
+                f"Atualização disponível: v{update.version}. Abra o menu da bandeja para atualizar.",
             )
-        self._notify("Whisper Dictation", "Lista de microfones enviada para o log.")
+        elif notify_when_current:
+            self._notify("Whisper Dictation", "Você já está na versão mais recente.")
+
+    def _run_update(self, update: updater.UpdateInfo) -> None:
+        try:
+            updater.download_and_launch(
+                update,
+                on_status=lambda msg: self._notify("Whisper Dictation", msg),
+            )
+        except Exception as exc:
+            self._set_error(f"Falha ao baixar a atualização: {exc}")
+            return
+        self._shutdown_app()
+
+    def _menu_update(self, icon: pystray.Icon, item: MenuItem) -> None:
+        del icon, item
+        if self._update_available is not None:
+            threading.Thread(
+                target=self._run_update,
+                args=(self._update_available,),
+                name="UpdateRun",
+                daemon=True,
+            ).start()
+        else:
+            self._notify("Whisper Dictation", "Verificando atualizações…")
+            threading.Thread(
+                target=self._check_updates,
+                args=(True,),
+                name="UpdateCheck",
+                daemon=True,
+            ).start()
 
     def _quit(self, icon: pystray.Icon, item: MenuItem) -> None:
-        del item
+        del icon, item
+        self._shutdown_app()
+
+    def _shutdown_app(self) -> None:
         self._shutdown.set()
         self._cancel_auto_stop()
         self.recorder.abort()
         self.hotkey_manager.stop()
-        icon.stop()
+        if self._instance is not None:
+            self._instance.stop()
+        self.icon.stop()
         self.logger.info("Application stopped")
 
     def _set_error(self, message: str) -> None:
@@ -320,19 +373,17 @@ class DictationApp:
         return Menu(
             MenuItem(lambda *_: self._status_label(), None, enabled=False),
             MenuItem(lambda *_: self._toggle_label(), self._menu_toggle, default=True),
-            MenuItem(
-                "Copiar última transcrição",
-                self._copy_last_transcript,
-                enabled=lambda *_: bool(self._last_transcript),
-            ),
+            Menu.SEPARATOR,
             MenuItem("Configurações...", self._open_settings),
-            MenuItem("Abrir config.json", self._open_config),
-            MenuItem("Recarregar configuração", self._reload_config),
-            MenuItem("Listar microfones no log", self._log_input_devices),
-            MenuItem("Abrir logs", self._open_logs),
-            MenuItem("Abrir pasta do projeto", self._open_project_folder),
+            MenuItem(lambda *_: self._update_label(), self._menu_update),
+            Menu.SEPARATOR,
             MenuItem("Sair", self._quit),
         )
+
+    def _update_label(self) -> str:
+        if self._update_available is not None:
+            return f"⬇ Atualizar para v{self._update_available.version}"
+        return "Verificar atualizações"
 
     def _menu_toggle(self, icon: pystray.Icon, item: MenuItem) -> None:
         del icon, item

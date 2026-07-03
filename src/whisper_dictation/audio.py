@@ -15,16 +15,75 @@ class CapturedAudio:
     duration_seconds: float
 
 
+# Host APIs preferred for the mic list, best first. WASAPI/MME give one clean
+# entry per real microphone; WDM-KS/DirectSound add duplicates and expose
+# loopback/output endpoints as "inputs".
+_PREFERRED_HOSTAPIS = ("Windows WASAPI", "MME")
+
+# Common non-microphone capture endpoints to hide (loopback / "listen to output").
+_EXCLUDED_NAME_HINTS = ("stereo mix", "mixagem est", "what u hear", "wave out mix", "o que você ouve")
+
+
 def list_input_devices() -> list[tuple[int, str, int]]:
-    devices = sd.query_devices()
+    """List real input microphones, deduplicated and free of driver/loopback noise.
+
+    ``sd.query_devices()`` returns every device across every Windows host API
+    (MME, DirectSound, WASAPI, WDM-KS), so the same mic shows up several times and
+    WDM-KS even lists speakers/raw driver endpoints as inputs. We restrict to a
+    single clean host API and drop obvious non-mic endpoints.
+    """
+    try:
+        devices = sd.query_devices()
+    except Exception:
+        return []
+
+    preferred = _preferred_hostapi(devices)
     result: list[tuple[int, str, int]] = []
+    seen_names: set[str] = set()
     for index, device in enumerate(devices):
-        max_input_channels = int(device.get("max_input_channels", 0))
-        if max_input_channels > 0:
-            name = str(device.get("name", "Unknown input"))
-            sample_rate = int(round(float(device.get("default_samplerate", 0))))
-            result.append((index, name, sample_rate))
+        if int(device.get("max_input_channels", 0)) <= 0:
+            continue
+        if preferred is not None and int(device.get("hostapi", -1)) != preferred:
+            continue
+
+        name = str(device.get("name", "Unknown input")).strip()
+        lowered = name.lower()
+        if any(hint in lowered for hint in _EXCLUDED_NAME_HINTS):
+            continue
+        if lowered in seen_names:
+            continue
+        seen_names.add(lowered)
+
+        sample_rate = int(round(float(device.get("default_samplerate", 0))))
+        result.append((index, name, sample_rate))
     return result
+
+
+def _preferred_hostapi(devices) -> int | None:
+    """Pick one host API index to list mics from (WASAPI > MME > default input)."""
+    try:
+        hostapis = sd.query_hostapis()
+    except Exception:
+        return None
+
+    def has_input(api_index: int) -> bool:
+        return any(
+            int(d.get("max_input_channels", 0)) > 0 and int(d.get("hostapi", -1)) == api_index
+            for d in devices
+        )
+
+    for preferred_name in _PREFERRED_HOSTAPIS:
+        for api_index, hostapi in enumerate(hostapis):
+            if hostapi.get("name") == preferred_name and has_input(api_index):
+                return api_index
+
+    try:
+        default_input = sd.default.device[0]
+        if isinstance(default_input, int) and default_input >= 0:
+            return int(devices[default_input]["hostapi"])
+    except Exception:
+        pass
+    return None
 
 
 class AudioRecorder:

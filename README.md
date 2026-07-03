@@ -12,10 +12,13 @@ Run it, and the app will live in your system tray (near the clock).
 
 ## Updating
 
-Download and run the latest installer again. It upgrades the existing install in
-`%LOCALAPPDATA%\WhisperDictation`, closes the running app when Windows allows it,
-replaces the application files, and keeps your `config.json`, `.env`, logs, and
-temporary folders.
+The app checks GitHub for a newer release on startup. When one is available you
+get a notification and the tray menu shows **⬇ Atualizar para vX.Y.Z** — click it
+(or the button under **Configurações → Sobre**) and it downloads and runs the
+latest installer automatically, then relaunches the updated app. Your
+`config.json`, saved API keys, logs and temporary folders are preserved.
+
+You can still update manually by downloading and running the latest installer.
 
 ## Usage
 
@@ -27,17 +30,30 @@ temporary folders.
 
 ## Settings
 
-Right-click the tray icon and open `Configurações...` to choose:
+Open settings either from the **"Configurações do Whisper Dictation"** shortcut
+(Start Menu / Desktop) or by right-clicking the tray icon → `Configurações...`.
+The window has tabs:
 
-- Transcription provider: Groq API or local CPU.
-- Language: automatic detection, Portuguese, or English.
-- Transcription model for the selected provider.
-- Input microphone.
+- **Transcrição**: pick a provider and its model, and paste the provider's API
+  key right there.
+  - **Groq** (cloud, very fast)
+  - **OpenAI** (`gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `whisper-1`)
+  - **Google Gemini** (`gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-2.0-flash`)
+  - **Local** (100% offline via `faster-whisper`, no key needed)
+  - Language: automatic detection, Portuguese, or English.
+- **Áudio**: input microphone.
+- **Atalho**: record a new global hotkey by pressing the key combination.
+- **Sobre**: version, check/apply updates, and quick access to logs and folder.
 
-The settings are saved to `config.json` and applied immediately when you click save.
+Settings are saved to `config.json` and applied immediately. **API keys are never
+written to disk in plain text** — they are stored in the Windows Credential
+Manager. If a cloud provider fails (no key, network issue), it automatically
+falls back to the local model.
 
 ## Privacy (It runs locally)
 
-Out of the box, this runs 100% offline using `faster-whisper`. Your audio never leaves your computer. 
+Out of the box, this runs 100% offline using `faster-whisper`. Your audio never leaves your computer.
 
-If you want it to be ridiculously fast and don't mind using the cloud, you can switch the provider to Groq API in the settings window and set a Groq API key in `.env`. But again, completely optional.
+If you want it to be ridiculously fast and don't mind using the cloud, switch the
+provider to Groq, OpenAI or Gemini in the settings window and paste your API key.
+Completely optional.

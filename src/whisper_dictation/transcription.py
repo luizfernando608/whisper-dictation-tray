@@ -10,7 +10,9 @@ from pathlib import Path
 
 import numpy as np
 
+from whisper_dictation import secrets_store
 from whisper_dictation.audio import CapturedAudio
+from whisper_dictation.providers import CLOUD_PROVIDERS
 from whisper_dictation.settings import AppConfig
 
 
@@ -20,6 +22,8 @@ class WhisperTranscriber:
         self.temp_root = temp_root
         self.logger = logger
         self._groq_client = None
+        self._openai_client = None
+        self._gemini_client = None
         self._local_model = None
 
     def transcribe(self, audio: CapturedAudio) -> str:
@@ -28,12 +32,14 @@ class WhisperTranscriber:
 
         wav_path = self._write_temp_wav(audio)
         try:
-            if self.config.transcription_provider == "groq":
+            provider = self.config.transcription_provider
+            if provider in CLOUD_PROVIDERS:
                 try:
-                    return self._transcribe_with_groq(wav_path)
+                    return self._transcribe_with_cloud(provider, wav_path)
                 except Exception as exc:
                     self.logger.warning(
-                        "Groq transcription failed; falling back to faster-whisper: %s",
+                        "%s transcription failed; falling back to faster-whisper: %s",
+                        provider,
                         exc,
                         exc_info=True,
                     )
@@ -41,10 +47,19 @@ class WhisperTranscriber:
         finally:
             wav_path.unlink(missing_ok=True)
 
+    def _transcribe_with_cloud(self, provider: str, wav_path: Path) -> str:
+        if provider == "groq":
+            return self._transcribe_with_groq(wav_path)
+        if provider == "openai":
+            return self._transcribe_with_openai(wav_path)
+        if provider == "gemini":
+            return self._transcribe_with_gemini(wav_path)
+        raise ValueError(f"Unknown cloud provider: {provider}")
+
     def _transcribe_with_groq(self, wav_path: Path) -> str:
-        api_key = os.environ.get(self.config.groq_api_key_env)
+        api_key = secrets_store.get_api_key("groq", self.config.groq_api_key_env)
         if not api_key:
-            raise RuntimeError(f"{self.config.groq_api_key_env} is not set")
+            raise RuntimeError("Chave de API do Groq não configurada")
 
         client = self._get_groq_client(api_key)
         language = _transcription_language(self.config.language)
@@ -80,6 +95,94 @@ class WhisperTranscriber:
         self.logger.info("Initializing Groq transcription client model=%s", self.config.groq_model)
         self._groq_client = Groq(api_key=api_key, timeout=self.config.groq_timeout_seconds)
         return self._groq_client
+
+    def _transcribe_with_openai(self, wav_path: Path) -> str:
+        api_key = secrets_store.get_api_key("openai")
+        if not api_key:
+            raise RuntimeError("Chave de API da OpenAI não configurada")
+
+        client = self._get_openai_client(api_key)
+        language = _transcription_language(self.config.language)
+        # gpt-4o-transcribe / -mini aceitam apenas response_format json|text; json serve.
+        request: dict = {
+            "model": self.config.openai_model,
+            "response_format": "json",
+        }
+        if language is not None:
+            request["language"] = language
+
+        with wav_path.open("rb") as audio_file:
+            transcription = client.audio.transcriptions.create(
+                file=audio_file,
+                **request,
+            )
+
+        text = _normalize_text(str(getattr(transcription, "text", "") or ""))
+        self.logger.info(
+            "OpenAI transcription finished model=%s language=%s text_length=%s",
+            self.config.openai_model,
+            language or "auto",
+            len(text),
+        )
+        return text
+
+    def _get_openai_client(self, api_key: str):
+        if self._openai_client is not None:
+            return self._openai_client
+
+        from openai import OpenAI
+
+        self.logger.info("Initializing OpenAI transcription client model=%s", self.config.openai_model)
+        self._openai_client = OpenAI(api_key=api_key, timeout=self.config.groq_timeout_seconds)
+        return self._openai_client
+
+    def _transcribe_with_gemini(self, wav_path: Path) -> str:
+        api_key = secrets_store.get_api_key("gemini")
+        if not api_key:
+            raise RuntimeError("Chave de API do Gemini não configurada")
+
+        client = self._get_gemini_client(api_key)
+        from google.genai import types
+
+        language = _transcription_language(self.config.language)
+        prompt = (
+            "Transcreva o áudio a seguir literalmente, palavra por palavra. "
+            "Responda somente com o texto transcrito, com pontuação natural, "
+            "sem comentários, rótulos ou explicações."
+        )
+        if language is not None:
+            prompt += f" O idioma falado é '{language}'."
+
+        audio_part = types.Part.from_bytes(
+            data=wav_path.read_bytes(),
+            mime_type="audio/wav",
+        )
+        response = client.models.generate_content(
+            model=self.config.gemini_model,
+            contents=[prompt, audio_part],
+        )
+
+        text = _normalize_text(str(getattr(response, "text", "") or ""))
+        self.logger.info(
+            "Gemini transcription finished model=%s language=%s text_length=%s",
+            self.config.gemini_model,
+            language or "auto",
+            len(text),
+        )
+        return text
+
+    def _get_gemini_client(self, api_key: str):
+        if self._gemini_client is not None:
+            return self._gemini_client
+
+        from google import genai
+
+        self.logger.info("Initializing Gemini transcription client model=%s", self.config.gemini_model)
+        self._gemini_client = genai.Client(
+            api_key=api_key,
+            http_options={"timeout": int(self.config.groq_timeout_seconds * 1000)},
+        )
+        return self._gemini_client
 
     def _transcribe_with_local_model(self, wav_path: Path) -> str:
         model = self._get_local_model()
