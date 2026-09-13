@@ -10,3 +10,4 @@ build/
 dist/
 Output/
 *.spec
+whatsapp_export/

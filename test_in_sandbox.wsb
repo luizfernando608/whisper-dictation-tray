@@ -1,0 +1,24 @@
+<Configuration>
+  <!-- Habilita aceleração de GPU para fluidez da interface -->
+  <VGpu>Enable</VGpu>
+
+  <!-- Habilita rede para permitir teste de provedores online (Groq, OpenAI, etc.) se desejado -->
+  <Networking>Enable</Networking>
+
+  <!-- Permite entrada de áudio (microfone) do host para poder testar o ditado -->
+  <AudioInput>Enable</AudioInput>
+
+  <!-- Mapeia a pasta Output onde está o instalador para a Área de Trabalho do Sandbox -->
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\Users\ziull\Documents\whisper-dictation-tray\Output</HostFolder>
+      <SandboxFolder>C:\Users\WDAGUtilityAccount\Desktop\Instalador</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+
+  <!-- Executa automaticamente o instalador assim que o Sandbox carregar -->
+  <LogonCommand>
+    <Command>cmd.exe /c start "" "C:\Users\WDAGUtilityAccount\Desktop\Instalador\WhisperDictation_Installer.exe"</Command>
+  </LogonCommand>
+</Configuration>

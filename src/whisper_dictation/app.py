@@ -270,7 +270,11 @@ class DictationApp:
     def _settings_ui_command(self) -> list[str]:
         if getattr(sys, "frozen", False):
             return [sys.executable, "--settings-ui"]
-        return [sys.executable, str(self.project_root / "main.py"), "--settings-ui"]
+        venv_py = self.project_root / ".venv" / "Scripts" / "pythonw.exe"
+        if not venv_py.exists():
+            venv_py = self.project_root / ".venv" / "Scripts" / "python.exe"
+        py = str(venv_py) if venv_py.exists() else sys.executable
+        return [py, str(self.project_root / "main.py"), "--settings-ui"]
 
     def _reload_config_from_disk(self) -> None:
         if not self._can_change_config("aplicar as configurações"):
