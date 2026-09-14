@@ -35,9 +35,12 @@ Write-Host "Building executable with PyInstaller..." -ForegroundColor Cyan
 Push-Location $ProjectRoot
 try {
     & $PythonCmd -m PyInstaller --noconfirm --clean --onedir --windowed `
-        --name "WhisperDictationTray" --paths $SrcPath `
+        --name "Pace" --paths $SrcPath `
+        --icon "assets\branding\pace.ico" `
+        --add-data "assets\branding;assets\branding" `
         --collect-all faster_whisper --collect-all ctranslate2 `
         --collect-all customtkinter --collect-all keyring --collect-all win32ctypes `
+        --collect-all numpy `
         --hidden-import keyring.backends.Windows `
         --collect-submodules openai --collect-submodules google.genai `
         main.py

@@ -1,41 +1,47 @@
 #ifndef AppVersion
-  #define AppVersion "1.2.0"
+  #define AppVersion "1.3.2"
 #endif
 
 [Setup]
-AppId=Whisper Dictation Tray
-AppName=Whisper Dictation Tray
+AppId=Pace
+AppName=PACE
 AppVersion={#AppVersion}
-AppPublisher=Whisper Dictation Tray
-DefaultDirName={localappdata}\WhisperDictation
-DefaultGroupName=Whisper Dictation
-UninstallDisplayIcon={app}\WhisperDictationTray.exe
+AppPublisher=PACE
+DefaultDirName={localappdata}\Pace
+DefaultGroupName=PACE
+UninstallDisplayIcon={app}\Pace.exe
+SetupIconFile=assets\branding\pace.ico
 SetupLogging=yes
 WizardStyle=modern
 DisableDirPage=auto
 DisableProgramGroupPage=auto
 UsePreviousAppDir=yes
 CloseApplications=yes
-CloseApplicationsFilter=WhisperDictationTray.exe
+CloseApplicationsFilter=Pace.exe,WhisperDictationTray.exe
 RestartApplications=no
 Compression=lzma2
 SolidCompression=yes
 OutputDir=Output
-OutputBaseFilename=WhisperDictation_Installer
+OutputBaseFilename=Pace_Installer
 PrivilegesRequired=lowest
 
 [InstallDelete]
+Type: files; Name: "{app}\Pace.exe"
 Type: files; Name: "{app}\WhisperDictationTray.exe"
 Type: filesandordirs; Name: "{app}\_internal"
+Type: files; Name: "{userdesktop}\Whisper Dictation — Configurações.lnk"
+Type: files; Name: "{userdesktop}\Whisper Dictation.lnk"
+Type: files; Name: "{userstartup}\Whisper Dictation.lnk"
 
 [Files]
-Source: "dist\WhisperDictationTray\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\Pace\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Whisper Dictation"; Filename: "{app}\WhisperDictationTray.exe"
-Name: "{group}\Configurações do Whisper Dictation"; Filename: "{app}\WhisperDictationTray.exe"; Parameters: "--settings"
-Name: "{userdesktop}\Whisper Dictation — Configurações"; Filename: "{app}\WhisperDictationTray.exe"; Parameters: "--settings"
-Name: "{userstartup}\Whisper Dictation"; Filename: "{app}\WhisperDictationTray.exe"
+Name: "{group}\PACE"; Filename: "{app}\Pace.exe"
+Name: "{group}\PACE — Configurações"; Filename: "{app}\Pace.exe"; Parameters: "--settings"
+Name: "{userdesktop}\PACE"; Filename: "{app}\Pace.exe"
+Name: "{userdesktop}\PACE — Configurações"; Filename: "{app}\Pace.exe"; Parameters: "--settings"
+Name: "{userstartup}\PACE"; Filename: "{app}\Pace.exe"
 
 [Run]
-Filename: "{app}\WhisperDictationTray.exe"; Description: "Launch Whisper Dictation Tray"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\Pace.exe"; Description: "Launch PACE"; Flags: nowait postinstall skipifsilent

@@ -74,7 +74,7 @@ class DictationApp:
         self._overlay = RecordingOverlay()
 
         self.icon = pystray.Icon(
-            "whisper-dictation-tray",
+            "pace",
             self._build_icon_image(self._state),
             title=self._tooltip(),
             menu=self._build_menu(),
@@ -87,7 +87,7 @@ class DictationApp:
             self._instance.register(QUIT, self._shutdown_app)
 
     def run(self) -> None:
-        self.logger.info("Starting Whisper Dictation Tray v%s", __version__)
+        self.logger.info("Starting PACE v%s", __version__)
         self.hotkey_manager.start()
         if self._instance is not None:
             self._instance.start_listener()
@@ -195,7 +195,7 @@ class DictationApp:
             if inserted:
                 status = "Texto inserido e copiado" if copied else "Texto inserido"
                 self._set_state(AppState.IDLE, status)
-                self._notify("Whisper Dictation", self._truncate_notification(text))
+                self._notify("PACE", self._truncate_notification(text))
             else:
                 status = "Texto transcrito e copiado" if copied else "Texto transcrito"
                 self._set_state(AppState.IDLE, status)
@@ -221,10 +221,10 @@ class DictationApp:
             state = self._state
 
         if state == AppState.RECORDING:
-            self._notify("Whisper Dictation", f"Pare a gravação antes de {action}.")
+            self._notify("PACE", f"Pare a gravação antes de {action}.")
             return False
         if state == AppState.TRANSCRIBING:
-            self._notify("Whisper Dictation", f"Espere a transcrição terminar antes de {action}.")
+            self._notify("PACE", f"Espere a transcrição terminar antes de {action}.")
             return False
         return True
 
@@ -282,7 +282,7 @@ class DictationApp:
         try:
             self._apply_config(AppConfig.load(self.config_path))
             self._set_state(AppState.IDLE, "Configurações aplicadas")
-            self._notify("Whisper Dictation", "Configurações atualizadas.")
+            self._notify("PACE", "Configurações atualizadas.")
         except Exception as exc:
             self._set_error(f"Falha ao aplicar configurações: {exc}")
 
@@ -290,7 +290,7 @@ class DictationApp:
         if not self._last_transcript:
             return
         self._copy_transcript_to_clipboard(self._last_transcript)
-        self._notify("Whisper Dictation", "Última transcrição copiada.")
+        self._notify("PACE", "Última transcrição copiada.")
 
     def _copy_transcript_to_clipboard(self, text: str) -> bool:
         try:
@@ -310,17 +310,17 @@ class DictationApp:
             except Exception:
                 self.logger.debug("Could not refresh tray menu after update check.")
             self._notify(
-                "Whisper Dictation",
+                "PACE",
                 f"Atualização disponível: v{update.version}. Abra o menu da bandeja para atualizar.",
             )
         elif notify_when_current:
-            self._notify("Whisper Dictation", "Você já está na versão mais recente.")
+            self._notify("PACE", "Você já está na versão mais recente.")
 
     def _run_update(self, update: updater.UpdateInfo) -> None:
         try:
             updater.download_and_launch(
                 update,
-                on_status=lambda msg: self._notify("Whisper Dictation", msg),
+                on_status=lambda msg: self._notify("PACE", msg),
             )
         except Exception as exc:
             self._set_error(f"Falha ao baixar a atualização: {exc}")
@@ -337,7 +337,7 @@ class DictationApp:
                 daemon=True,
             ).start()
         else:
-            self._notify("Whisper Dictation", "Verificando atualizações…")
+            self._notify("PACE", "Verificando atualizações…")
             threading.Thread(
                 target=self._check_updates,
                 args=(True,),
@@ -354,6 +354,7 @@ class DictationApp:
         self._cancel_auto_stop()
         self.recorder.abort()
         self.hotkey_manager.stop()
+        self._overlay.stop()
         if self._instance is not None:
             self._instance.stop()
         self.icon.stop()
@@ -363,7 +364,7 @@ class DictationApp:
         self._last_error = message
         self.logger.error(message)
         self._set_state(AppState.ERROR, message)
-        self._notify("Whisper Dictation", message)
+        self._notify("PACE", message)
 
     def _set_state(self, state: AppState, status_message: str) -> None:
         with self._state_lock:
@@ -395,7 +396,7 @@ class DictationApp:
 
     def _status_label(self) -> str:
         with self._state_lock:
-            return f"Estado: {self._status_message} | Hotkey: {self.config.hotkey}"
+            return f"PACE v{__version__} | {self._status_message}"
 
     def _toggle_label(self) -> str:
         with self._state_lock:
@@ -406,7 +407,7 @@ class DictationApp:
             return "Iniciar gravação"
 
     def _tooltip(self) -> str:
-        return f"Whisper Dictation | {self._status_message}"
+        return f"PACE | {self._status_message}"
 
     def _notify(self, title: str, message: str) -> None:
         if not getattr(self.icon, "HAS_NOTIFICATION", False):
@@ -422,20 +423,51 @@ class DictationApp:
         return text[:117].rstrip() + "..."
 
     def _build_icon_image(self, state: AppState) -> Image.Image:
-        palette = {
-            AppState.IDLE: ("#1f2937", "#2563eb"),
-            AppState.RECORDING: ("#3f0d12", "#ef4444"),
-            AppState.TRANSCRIBING: ("#1f2937", "#10b981"),
-            AppState.ERROR: ("#451a03", "#f59e0b"),
-        }
-        background, accent = palette[state]
-        size = 128
-        image = Image.new("RGBA", (size, size), background)
-        draw = ImageDraw.Draw(image)
+        """Draw the official PACE acoustic cursor icon with dynamic state colors."""
+        target_size = 64
+        canvas_size = 128
+        img = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
 
-        draw.rounded_rectangle((18, 18, 110, 110), radius=26, fill=accent)
-        draw.rounded_rectangle((46, 28, 82, 74), radius=16, fill="white")
-        draw.rectangle((58, 72, 70, 92), fill="white")
-        draw.rounded_rectangle((40, 90, 88, 98), radius=4, fill="white")
-        draw.rectangle((58, 98, 70, 108), fill="white")
-        return image
+        # Base Squircle: Grafite Acetinado (#10121A) com borda discreta
+        draw.rounded_rectangle(
+            (8, 8, 120, 120),
+            radius=28,
+            fill=(14, 16, 23, 255),
+            outline=(38, 43, 60, 255),
+            width=2,
+        )
+
+        # Cor dinâmica do cursor lúmen central
+        state_colors = {
+            AppState.IDLE: (255, 255, 255, 255),          # Branco lúmen
+            AppState.RECORDING: (239, 68, 68, 255),       # Vermelho elétrico
+            AppState.TRANSCRIBING: (52, 211, 153, 255),   # Esmeralda vibrante
+            AppState.ERROR: (245, 158, 11, 255),          # Âmbar
+        }
+        center_color = state_colors.get(state, (255, 255, 255, 255))
+        side_color = (68, 76, 102, 255)
+
+        # Geometria das 5 hastes acústicas simétricas
+        # w = 7px, pitch = 12.5px
+        cx, cy = 64.0, 64.0
+        w = 7.0
+        r = w / 2.0
+        bars = [
+            (-25.0, 19.0, False),
+            (-12.5, 38.0, False),
+            (0.0,   60.0, True),
+            (12.5,  38.0, False),
+            (25.0,  19.0, False),
+        ]
+
+        for offset_x, h, is_center in bars:
+            x0 = cx + offset_x - r
+            x1 = cx + offset_x + r
+            y0 = cy - h / 2.0
+            y1 = cy + h / 2.0
+            color = center_color if is_center else side_color
+            draw.rounded_rectangle((x0, y0, x1, y1), radius=r, fill=color)
+
+        return img.resize((target_size, target_size), Image.Resampling.LANCZOS)
+

@@ -23,7 +23,7 @@ from whisper_dictation._version import __version__
 
 REPO = "luizfernando608/whisper-dictation-tray"
 _API_LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
-_INSTALLER_NAME = "WhisperDictation_Installer.exe"
+_INSTALLER_NAME = "Pace_Installer.exe"
 _FALLBACK_URL = f"https://github.com/{REPO}/releases/latest/download/{_INSTALLER_NAME}"
 _DETACHED_PROCESS = 0x00000008
 
@@ -70,7 +70,7 @@ def check_for_update(timeout: float = 10.0) -> UpdateInfo | None:
             _API_LATEST,
             headers={
                 "Accept": "application/vnd.github+json",
-                "User-Agent": "WhisperDictationTray",
+                "User-Agent": "PACE-App",
             },
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -111,7 +111,7 @@ def download_installer(
     dest_dir = dest_dir or tempfile.gettempdir()
     dest = os.path.join(dest_dir, _INSTALLER_NAME)
     request = urllib.request.Request(
-        update.installer_url, headers={"User-Agent": "WhisperDictationTray"}
+        update.installer_url, headers={"User-Agent": "PACE-App"}
     )
     with urllib.request.urlopen(request, timeout=timeout) as response, open(dest, "wb") as out:
         while True:

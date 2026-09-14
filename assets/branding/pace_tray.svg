@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- Ícone de Bandeja do Windows (Fundo Transparente) -->
+  <!-- Barra 1 (Extrema Esquerda) -->
+  <rect x="2" y="9.5" width="2.4" height="5" rx="1.2" fill="#94A3B8" />
+
+  <!-- Barra 2 (Média Esquerda) -->
+  <rect x="6.4" y="6.5" width="2.4" height="11" rx="1.2" fill="#94A3B8" />
+
+  <!-- Barra 3 (Cursor Central em Branco Puro Destaque) -->
+  <rect x="10.8" y="3" width="2.4" height="18" rx="1.2" fill="#FFFFFF" />
+
+  <!-- Barra 4 (Média Direita) -->
+  <rect x="15.2" y="6.5" width="2.4" height="11" rx="1.2" fill="#94A3B8" />
+
+  <!-- Barra 5 (Extrema Direita) -->
+  <rect x="19.6" y="9.5" width="2.4" height="5" rx="1.2" fill="#94A3B8" />
+</svg>

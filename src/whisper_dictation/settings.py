@@ -93,11 +93,28 @@ class AppConfig:
 
 
 def config_path(project_root: Path) -> Path:
-    return project_root / "config.json"
+    target = project_root / "config.json"
+    if not target.exists():
+        legacy = project_root.parent / "WhisperDictation" / "config.json"
+        if legacy.exists():
+            try:
+                import shutil
+                shutil.copy2(legacy, target)
+            except Exception:
+                pass
+    return target
 
 
 def load_env_file(project_root: Path) -> None:
     env_path = project_root / ".env"
+    if not env_path.exists():
+        legacy = project_root.parent / "WhisperDictation" / ".env"
+        if legacy.exists():
+            try:
+                import shutil
+                shutil.copy2(legacy, env_path)
+            except Exception:
+                pass
     if not env_path.exists():
         return
 

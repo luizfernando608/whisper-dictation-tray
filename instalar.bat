@@ -1,10 +1,10 @@
-﻿@echo off
+@echo off
 chcp 65001 >nul
-title Whisper Dictation Tray - Instalacao
+title PACE - Instalacao
 cd /d "%~dp0"
 
 echo ===================================================
-echo     Whisper Dictation Tray - Instalando...
+echo             PACE - Instalando...
 echo ===================================================
 echo.
 

@@ -7,7 +7,7 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = $PSScriptRoot
 $VenvPath = Join-Path $ProjectRoot ".venv"
 
-Write-Host "--- Whisper Dictation Tray: Instalação ---" -ForegroundColor Cyan
+Write-Host "--- PACE: Instalação ---" -ForegroundColor Cyan
 
 # 1. Verificar FFmpeg
 $FfmpegCmd = Get-Command ffmpeg -ErrorAction SilentlyContinue
@@ -85,12 +85,14 @@ if (-not (Test-Path $EnvFile) -and (Test-Path $EnvExample)) {
 # 6. Inicialização com o Windows (Startup)
 Write-Host "Configurando inicialização automática com o Windows..." -ForegroundColor Cyan
 $StartupFolder = [Environment]::GetFolderPath("Startup")
-$ShortcutPath = Join-Path $StartupFolder "WhisperDictation.lnk"
+$ShortcutPath = Join-Path $StartupFolder "PACE.lnk"
 $WshShell = New-Object -ComObject WScript.Shell
 $Shortcut = $WshShell.CreateShortcut($ShortcutPath)
 $Shortcut.TargetPath = "powershell.exe"
 $Shortcut.Arguments = "-WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ProjectRoot\run.ps1`""
 $Shortcut.WorkingDirectory = $ProjectRoot
+$Ico = Join-Path $ProjectRoot "assets\branding\pace.ico"
+if (Test-Path $Ico) { $Shortcut.IconLocation = $Ico }
 $Shortcut.Save()
 Write-Host "[OK] Atalho de inicialização criado." -ForegroundColor Green
 

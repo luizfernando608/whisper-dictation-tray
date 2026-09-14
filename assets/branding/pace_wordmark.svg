@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 160" width="100%" height="100%">
+  <defs>
+    <linearGradient id="cursorWordmark" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="100%" stop-color="#C7D7FE" />
+    </linearGradient>
+    <linearGradient id="barWordmark" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#4B556D" />
+      <stop offset="100%" stop-color="#2D3345" />
+    </linearGradient>
+  </defs>
+
+  <!-- Fundo Escuro Opcional -->
+  <rect width="600" height="160" rx="24" fill="#0A0B0F" />
+
+  <!-- Símbolo Acústico (à esquerda) -->
+  <g transform="translate(40, 15)">
+    <!-- Barra 1 (Extrema Esquerda - h=40) -->
+    <rect x="0" y="45" width="14" height="40" rx="7" fill="url(#barWordmark)" />
+
+    <!-- Barra 2 (Média Esquerda - h=75) -->
+    <rect x="25" y="27" width="14" height="76" rx="7" fill="url(#barWordmark)" />
+
+    <!-- Barra 3 (Cursor Central - h=120) -->
+    <rect x="50" y="5" width="14" height="120" rx="7" fill="url(#cursorWordmark)" />
+
+    <!-- Barra 4 (Média Direita - h=75) -->
+    <rect x="75" y="27" width="14" height="76" rx="7" fill="url(#barWordmark)" />
+
+    <!-- Barra 5 (Extrema Direita - h=40) -->
+    <rect x="100" y="45" width="14" height="40" rx="7" fill="url(#barWordmark)" />
+  </g>
+
+  <!-- Tipografia PACE (Letras Geométricas em Vetor Puro) -->
+  <g transform="translate(190, 108)" fill="#FFFFFF">
+    <text font-family="-apple-system, BlinkMacSystemFont, 'Inter', 'Geist', 'Segoe UI', sans-serif" font-size="78" font-weight="800" letter-spacing="4">PACE</text>
+  </g>
+
+  <!-- Tagline sutil -->
+  <g transform="translate(425, 105)" fill="#6366F1">
+    <circle cx="0" cy="-6" r="4" fill="#6366F1" />
+  </g>
+</svg>

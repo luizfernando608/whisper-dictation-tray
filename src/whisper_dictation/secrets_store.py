@@ -11,7 +11,8 @@ from __future__ import annotations
 import logging
 import os
 
-SERVICE_NAME = "WhisperDictationTray"
+SERVICE_NAME = "PACE"
+LEGACY_SERVICE_NAME = "WhisperDictationTray"
 
 # Provider -> legacy environment variable used as a read fallback.
 ENV_FALLBACK: dict[str, str] = {
@@ -49,6 +50,14 @@ def get_api_key(provider: str, env_var: str | None = None) -> str | None:
             value = kr.get_password(SERVICE_NAME, provider)
             if value:
                 return value
+            # Legacy fallback: check previous WhisperDictationTray vault and migrate
+            legacy_value = kr.get_password(LEGACY_SERVICE_NAME, provider)
+            if legacy_value:
+                try:
+                    kr.set_password(SERVICE_NAME, provider, legacy_value)
+                except Exception:
+                    pass
+                return legacy_value
         except Exception:
             _logger.warning(
                 "Falha ao ler a chave de %s no keyring.", provider, exc_info=True
@@ -83,11 +92,11 @@ def delete_api_key(provider: str) -> None:
     kr = _keyring()
     if kr is None:
         return
-    try:
-        kr.delete_password(SERVICE_NAME, provider)
-    except Exception:
-        # Nothing stored yet, or backend refused deletion — safe to ignore.
-        _logger.debug("Nada para remover no keyring para %s.", provider, exc_info=True)
+    for svc in (SERVICE_NAME, LEGACY_SERVICE_NAME):
+        try:
+            kr.delete_password(svc, provider)
+        except Exception:
+            pass
 
 
 def has_api_key(provider: str, env_var: str | None = None) -> bool:

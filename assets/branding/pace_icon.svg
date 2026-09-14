@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Gradiente de Fundo do Squircle (Grafite Profundo) -->
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#161822" />
+      <stop offset="100%" stop-color="#0A0B0F" />
+    </linearGradient>
+
+    <!-- Borda sutil de 1px -->
+    <linearGradient id="borderGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#2D3245" />
+      <stop offset="100%" stop-color="#181B26" />
+    </linearGradient>
+
+    <!-- Gradiente das Hastes Acústicas Laterais (Grafite Metálico Suave) -->
+    <linearGradient id="sideBarGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3D4358" />
+      <stop offset="100%" stop-color="#242836" />
+    </linearGradient>
+
+    <!-- Gradiente do Cursor Lúmen Central (Branco Puro -> Gelo Índigo) -->
+    <linearGradient id="cursorGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" />
+      <stop offset="60%" stop-color="#F1F5FD" />
+      <stop offset="100%" stop-color="#C7D7FE" />
+    </linearGradient>
+
+    <!-- Brilho Lúmen do Cursor (Filtro Óptico SVG) -->
+    <filter id="lumenGlow" x="-50%" y="-30%" width="200%" height="160%">
+      <feGaussianBlur stdDeviation="8" result="blur1" />
+      <feGaussianBlur stdDeviation="18" result="blur2" />
+      <feMerge>
+        <feMergeNode in="blur2" />
+        <feMergeNode in="blur1" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <!-- Halo Difuso de Fundo -->
+    <radialGradient id="ambientHalo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#6366F1" stop-opacity="0.18" />
+      <stop offset="100%" stop-color="#6366F1" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+
+  <!-- Fundo / Base Squircle -->
+  <rect x="32" y="32" width="448" height="448" rx="104" ry="104" fill="url(#bgGradient)" stroke="url(#borderGradient)" stroke-width="2" />
+
+  <!-- Halo de Luz Ambiente Central -->
+  <circle cx="256" cy="256" r="160" fill="url(#ambientHalo)" />
+
+  <!-- Hastes Acústicas da Onda Sonora (Simétricas e Proporcionais) -->
+  <!-- Barra 1 (Extrema Esquerda - h=76) -->
+  <rect x="142" y="218" width="28" height="76" rx="14" ry="14" fill="url(#sideBarGradient)" />
+
+  <!-- Barra 2 (Média Esquerda - h=150) -->
+  <rect x="192" y="181" width="28" height="150" rx="14" ry="14" fill="url(#sideBarGradient)" />
+
+  <!-- Barra 4 (Média Direita - h=150) -->
+  <rect x="292" y="181" width="28" height="150" rx="14" ry="14" fill="url(#sideBarGradient)" />
+
+  <!-- Barra 5 (Extrema Direita - h=76) -->
+  <rect x="342" y="218" width="28" height="76" rx="14" ry="14" fill="url(#sideBarGradient)" />
+
+  <!-- Barra 3 (O Cursor Lúmen Central - h=240, com brilho) -->
+  <!-- Camada de Brilho Neon Especular -->
+  <rect x="242" y="136" width="28" height="240" rx="14" ry="14" fill="#818CF8" opacity="0.45" filter="url(#lumenGlow)" />
+  <!-- Haste Central Nítida -->
+  <rect x="242" y="136" width="28" height="240" rx="14" ry="14" fill="url(#cursorGradient)" />
+</svg>

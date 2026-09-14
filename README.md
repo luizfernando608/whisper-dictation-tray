@@ -1,14 +1,12 @@
-# Whisper Dictation Tray
+# PACE — The Speed of Thought
 
-I originally built this because I was getting tired of manually typing out long prompts all day.
-
-It's a lightweight tray app that lets you dictate text anywhere on Windows using Whisper. It actually gets punctuation right and is way more accurate than the built-in Windows dictation.
+Dictate at the speed of thought. A lightweight, premium Windows app for seamless neural voice dictation across any application.
 
 ## Getting Started
 
-Grab the installer directly here: [**Download WhisperDictation_Installer.exe**](https://github.com/luizfernando608/whisper-dictation-tray/releases/latest/download/WhisperDictation_Installer.exe)
+Grab the installer directly here: [**Download Pace_Installer.exe**](https://github.com/luizfernando608/whisper-dictation-tray/releases/latest/download/Pace_Installer.exe)
 
-Run it, and the app will live in your system tray (near the clock).
+Run it, and PACE will live in your system tray (near the clock).
 
 ## Updating
 
@@ -30,7 +28,7 @@ You can still update manually by downloading and running the latest installer.
 
 ## Settings
 
-Open settings either from the **"Configurações do Whisper Dictation"** shortcut
+Open settings either from the **"PACE — Configurações"** shortcut
 (Start Menu / Desktop) or by right-clicking the tray icon → `Configurações...`.
 The window has tabs:
 

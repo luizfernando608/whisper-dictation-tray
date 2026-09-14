@@ -19,7 +19,7 @@ from whisper_dictation.single_instance import OPEN_SETTINGS, SingleInstance, pro
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Whisper Dictation Tray para Windows.")
+    parser = argparse.ArgumentParser(description="PACE — Voice Dictation para Windows.")
     parser.add_argument(
         "--list-devices",
         action="store_true",
