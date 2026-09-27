@@ -206,6 +206,8 @@ class DictationApp:
 
     def _schedule_auto_stop(self) -> None:
         self._cancel_auto_stop()
+        if self.config.max_record_seconds <= 0:
+            return
         self._auto_stop_timer = threading.Timer(self.config.max_record_seconds, self._stop_recording)
         self._auto_stop_timer.daemon = True
         self._auto_stop_timer.start()

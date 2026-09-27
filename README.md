@@ -39,7 +39,7 @@ The window has tabs:
   - **Google Gemini** (`gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-2.0-flash`)
   - **Local** (100% offline via `faster-whisper`, no key needed)
   - Language: automatic detection, Portuguese, or English.
-- **Áudio**: input microphone.
+- **Áudio**: input microphone and recording time limit (unlimited manual stop, or 2 to 120 minutes auto-stop).
 - **Atalho**: record a new global hotkey by pressing the key combination.
 - **Sobre**: version, check/apply updates, and quick access to logs and folder.
 

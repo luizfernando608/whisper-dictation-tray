@@ -39,6 +39,17 @@ LANGUAGE_OPTIONS = [
     ("Inglês", "en"),
 ]
 
+RECORD_LIMIT_OPTIONS = [
+    ("Sem limite (manual pelo atalho)", 0),
+    ("120 minutos (2 horas)", 7200),
+    ("60 minutos (1 hora)", 3600),
+    ("30 minutos (recomendado)", 1800),
+    ("15 minutos", 900),
+    ("10 minutos", 600),
+    ("5 minutos", 300),
+    ("2 minutos (original)", 120),
+]
+
 _DEFAULT_MIC = "Padrão do sistema"
 
 
@@ -197,6 +208,10 @@ def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsConte
     mic_options, current_mic, mic_error = _build_microphone_options(config.input_device)
     mic_by_label = {option.label: option for option in mic_options}
     mic_labels = [option.label for option in mic_options]
+
+    limit_options, current_limit = _build_record_limit_options(config.max_record_seconds)
+    limit_by_label = {label: value for label, value in limit_options}
+    limit_labels = [label for label, _ in limit_options]
 
     hotkey_var = tk.StringVar(value=config.hotkey)
     key_var = tk.StringVar()
@@ -365,6 +380,21 @@ def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsConte
             tab_audio, text=f"Falha ao listar microfones: {mic_error}", text_color=COLOR_DANGER
         ).pack(anchor="w", padx=4, pady=(6, 0))
 
+    ctk.CTkLabel(tab_audio, text="Tempo limite de escuta / gravação", text_color=COLOR_TEXT_MAIN).pack(
+        anchor="w", padx=4, pady=(16, 6)
+    )
+    limit_menu = ctk.CTkOptionMenu(
+        tab_audio, values=limit_labels, width=430, dynamic_resizing=False, **menu_style
+    )
+    limit_menu.pack(fill="x", padx=4)
+    limit_menu.set(current_limit)
+    ctk.CTkLabel(
+        tab_audio,
+        text="Tempo contínuo que o microfone escuta antes de parar automaticamente.",
+        text_color=muted,
+        font=hint_font,
+    ).pack(anchor="w", padx=4, pady=(6, 0))
+
     # ============================== ATALHO =============================
     ctk.CTkLabel(
         tab_hotkey, text="Atalho global para iniciar/parar a gravação", text_color=COLOR_TEXT_MAIN
@@ -428,6 +458,7 @@ def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsConte
         data["gemini_model"] = model_by_provider["gemini"]
         data["model_size"] = model_by_provider["local"]
         data["input_device"] = selected_mic.value
+        data["max_record_seconds"] = limit_by_label.get(limit_menu.get(), config.max_record_seconds)
         data["hotkey"] = hotkey
 
         new_config = AppConfig(**AppConfig._sanitize(data))
@@ -710,3 +741,19 @@ def _build_language_options(current: str) -> tuple[list[tuple[str, str]], str]:
     custom_label = f"Personalizado: {current}"
     options.append((custom_label, current))
     return options, custom_label
+
+
+def _build_record_limit_options(current: int) -> tuple[list[tuple[str, int]], str]:
+    options = list(RECORD_LIMIT_OPTIONS)
+    for label, value in options:
+        if value == current:
+            return options, label
+
+    if current <= 0:
+        return options, options[0][0]
+
+    mins = current / 60.0
+    custom_label = f"Personalizado: {int(mins) if mins.is_integer() else mins:.1f} min"
+    options.append((custom_label, current))
+    return options, custom_label
+

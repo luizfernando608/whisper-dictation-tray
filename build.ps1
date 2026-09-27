@@ -38,7 +38,7 @@ try {
         --name "Pace" --paths $SrcPath `
         --icon "assets\branding\pace.ico" `
         --add-data "assets\branding;assets\branding" `
-        --collect-all faster_whisper --collect-all ctranslate2 `
+        --collect-all faster_whisper --collect-all ctranslate2 --collect-all av `
         --collect-all customtkinter --collect-all keyring --collect-all win32ctypes `
         --collect-all numpy `
         --hidden-import keyring.backends.Windows `
