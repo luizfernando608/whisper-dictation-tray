@@ -16,6 +16,24 @@ from whisper_dictation import nemotron_diarization as module
 
 
 class NativeDiarizationTests(unittest.TestCase):
+    def test_invalid_manifest_shape_can_be_repaired_by_explicit_preparation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for manifest in ([], None, {}, {"files": []}, {"files": {"model": None}}):
+                module.atomic_json(root / "prepared.json", manifest)
+                with self.assertRaisesRegex(RuntimeError, "Cache Nemotron inválido"):
+                    module._prepared(root)
+            config = type("Config", (), {"transcription_provider": "groq"})()
+            native = root / "nemotron-3"
+            native.mkdir()
+            module.atomic_json(native / "prepared.json", [])
+            # Reaching the official download proves invalid cache isn't treated
+            # as a fatal AttributeError/KeyError before preparation can repair it.
+            with patch.object(module, "_download", side_effect=RuntimeError("repair download reached")) as download:
+                with self.assertRaisesRegex(RuntimeError, "repair download reached"):
+                    module.prepare_models(config, root)
+                download.assert_called_once()
+
     def test_failed_gpu_does_not_skip_later_working_gpu(self):
         calls = []
         reference = [{"start": 0, "end": 1, "speaker": "SPEAKER_00"}]

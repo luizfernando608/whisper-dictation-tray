@@ -42,8 +42,11 @@ revisão. Não encerrar entrega com falhas relevantes abertas.
 
 ## Progresso
 
-- T1: em andamento.
-- T2: em andamento.
-- T3: em andamento.
-- T4: em andamento.
-- T5: pendente.
+- T1: implementada, testes e revisão independente concluídos.
+- T2: implementada com Nemotron local sem token como padrão, CPU/Vulkan reais,
+  ensaios de memória de 2 h e identidades de 30 min; revisão independente concluída.
+- T3: implementada, testes e revisão independente concluídos. Upgrade real de
+  instalação anterior permanece gate de publicação; não executar no app do usuário.
+- T4: implementada; integração/UI/IPC/configurações revisadas com correções revalidadas.
+- T5: 108 testes sem skips, compileall e runtimes sintéticos passaram. Pacote final
+  em reconstrução/validação; limitações de hardware e gates de publicação no relatório.

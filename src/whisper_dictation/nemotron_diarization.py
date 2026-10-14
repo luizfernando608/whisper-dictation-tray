@@ -252,6 +252,10 @@ def _prepared(root: Path) -> dict:
         manifest = json.loads((root / "prepared.json").read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise RuntimeError("Prepare os modelos Nemotron 3 nas configurações.") from exc
+    if (not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict)
+            or any(not isinstance(name, str) or not isinstance(digest, str)
+                   for name, digest in manifest["files"].items())):
+        raise RuntimeError("Cache Nemotron inválido; prepare novamente.")
     if manifest.get("model") != MODEL or manifest.get("model_sha256") != MODEL_SHA or manifest.get("runtime_version") != "0.2.0":
         raise RuntimeError("Cache Nemotron incompatível; prepare novamente.")
     model = root / MODEL_FILE

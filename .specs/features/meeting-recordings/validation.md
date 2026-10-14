@@ -1,10 +1,11 @@
 # Validação em andamento — PACE 1.5.0
 
-Não é aprovação de publicação. Build final e escolha do motor padrão pendentes.
+Não é aprovação de publicação. O padrão local sem token foi confirmado pelo usuário.
+O pacote final está sendo reconstruído após a última correção de recuperação de cache.
 
 ## Evidências
 
-- 89 testes passaram com `PACE_RUN_MODEL_SMOKE=1` e `PYTHONPATH=src` em 2026-10-14.
+- 108 testes passaram com `PACE_RUN_MODEL_SMOKE=1` e `PYTHONPATH=src` em 2026-10-14.
 - `pip check`: sem dependências quebradas. ORT CPU no ambiente principal; DirectML
   fica em wheel isolada e só é importado pelo subprocesso específico.
 - PyInstaller e Inno Setup geraram um primeiro candidato. O código recebeu ajustes
@@ -17,6 +18,17 @@ Não é aprovação de publicação. Build final e escolha do motor padrão pend
 - Player RF64 e seek comparados amostra a amostra. Nenhum áudio pessoal foi usado.
 - Interfaces Tk renderizadas com biblioteca sintética e inspecionadas: filtros,
   seleção, cancelamento/retry, nomes de falantes, preparação e exportação.
+- Nemotron treinado: CPU e Intel Vulkan produziram 25 turnos/3 IDs na AMI pública
+  de 60 s. DER com collar de 0,25 s: 13,574%; a quarta voz com duas intervenções
+  breves não foi separada. Não representa acurácia universal nem valida português.
+- Pipeline real local completo com Whisper tiny e Nemotron: `ready`, 18 segmentos,
+  25 turnos e exportações TXT/SRT, sem credenciais externas.
+- CAPI com um estado por gravação e leituras de 5 s: duas horas de silêncio em
+  217,64 s, pico real do processo 207.106.048 bytes (197,5 MiB), nenhum turno falso.
+- AMI repetida por 30 min: 770 turnos/3 IDs, sem trocas de rótulos detectadas nos
+  pontos verificados, inclusive após compactação. Erro com IDs fixos vs primeiro
+  minuto entre 1,38–3,13%; ensaio artificial de continuidade, não qualidade de reunião.
+  Detalhes/licenças: [relatório Nemotron](nemotron-validation.md).
 
 ## Revisões independentes realizadas
 
@@ -47,12 +59,28 @@ Achados reproduzidos e corrigidos/revalidados:
   retoma em CPU uma vez e preserva os checkpoints em falha persistente.
 - Associação de palavras com custo quadrático: acumulação por segmento.
 - Botões de exportação fora da janela: área de texto com altura mínima adequada.
+- Instância antiga aceitando comando sem executar: versão/pasta/capacidades
+  verificadas antes de encaminhar comandos e importações.
+- Importação concorrente com troca de pasta: enfileiramento no serviço principal,
+  sob os mesmos locks da configuração, com metadados completos no INSERT.
+- Exceção de disco/SQLite encerrando o listener IPC: handler protegido, erro
+  retornado e pedidos seguintes continuam funcionando; lote parcial fica explícito.
+- Cache Nemotron com JSON válido mas formato inválido bloqueando reparo: estrutura
+  validada antes de uso, erro reparável pelo preparo explícito.
+- CLI nativa carregando áudio inteiro: substituída pela CAPI stateful por blocos;
+  pico de RAM caiu de 2,17 GiB para 197,5 MiB no ensaio de duas horas.
+- Falha de GPU impedindo teste das seguintes: isolamento de falha por candidato.
+- Launcher Python subestimando RAM e deixando descendente após cancelamento:
+  medição no processo que hospeda DLL e encerramento da árvore própria.
+- Leitura de progresso impedindo replace no Windows: progresso advisory não
+  interrompe inferência/preparo; resultado final é persistido separadamente.
 
 ## Verificações ainda necessárias
 
 - Candidato final reconstruído e revisão independente correspondente.
-- Identidades globais, sobreposição e qualidade com pesos treinados/vozes anotadas.
-  Community-1 exige aceite/token; alternativa pública NVIDIA está em protótipo.
+- Qualidade treinada Community-1, português e cinco ou mais falantes substanciais.
+  Community-1 exige aceite/token e permanece opcional. Nemotron treinado foi
+  verificado apenas nos cenários públicos e sintéticos descritos acima.
 - Captura prolongada com hardware real, suspensão e desconexão físicas.
 - Atualização real de instalação anterior: instalador gerado, mas não executado
   sobre a instalação do usuário. Os testes do helper usam processos/filesystems
