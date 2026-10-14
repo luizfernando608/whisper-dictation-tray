@@ -48,5 +48,7 @@ revisão. Não encerrar entrega com falhas relevantes abertas.
 - T3: implementada, testes e revisão independente concluídos. Upgrade real de
   instalação anterior permanece gate de publicação; não executar no app do usuário.
 - T4: implementada; integração/UI/IPC/configurações revisadas com correções revalidadas.
-- T5: 109 testes sem skips, compileall e runtimes sintéticos passaram. Pacote final
-  em reconstrução/validação; limitações de hardware e gates de publicação no relatório.
+- T5: concluída para o candidato local 6303b9b: 109 testes sem skips, compileall,
+  PyInstaller/Inno, pipeline local real no frozen, quatro runtimes sintéticos e
+  revisão independente de CPU/Vulkan/UI/hashes. Hardware e upgrade reais continuam
+  gates de publicação explícitos no relatório, sem aprovação além do que foi testado.

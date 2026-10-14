@@ -1,15 +1,27 @@
-# Validação em andamento — PACE 1.5.0
+# Validação do candidato — PACE 1.5.0
 
-Não é aprovação de publicação. O padrão local sem token foi confirmado pelo usuário.
-O pacote final está sendo reconstruído após a última correção de recuperação de cache.
+Candidato local gerado e revisado em 2026-10-14. O padrão local sem token foi
+confirmado pelo usuário. Aprovação restrita aos cenários executados; os gates de
+publicação com instalação/hardware reais estão listados ao final.
+
+## Identificação do pacote revisado
+
+- Código: `6303b9b3563cac668dae8c9e682fa2f2d3ee90de`, fonte limpa no build.
+- Versão: 1.5.0. Build: 2026-10-14 23:08:58 UTC.
+- `Output/Pace_Installer.exe`: 335.029.966 bytes; SHA256
+  `92BEDEA7C86B40A59639F3C81D2AB85F513114E561552D15E0F428D6F3FDF49A`.
+- `dist/Pace/Pace.exe`: SHA256
+  `DCDED938CFBD7CA8A5504E78B2F89A87DF26BEA71017481F5F70065605580AA5`.
+- Metadados: `Output/Pace_Installer.build.json` e
+  `Output/Pace_Installer.sha256.json`; hashes conferidos independentemente.
 
 ## Evidências
 
 - 109 testes passaram com `PACE_RUN_MODEL_SMOKE=1` e `PYTHONPATH=src` em 2026-10-14.
 - `pip check`: sem dependências quebradas. ORT CPU no ambiente principal; DirectML
   fica em wheel isolada e só é importado pelo subprocesso específico.
-- PyInstaller e Inno Setup geraram um primeiro candidato. O código recebeu ajustes
-  posteriores de revisão: é necessário reconstruir o candidato final.
+- PyInstaller e Inno Setup concluíram o candidato acima após todas as correções
+  de fonte; a revisão final usou o mesmo executável e conferiu os dois hashes.
 - Teste do executável empacotado: CPU ONNX, OpenVINO CPU, GPU Intel OpenVINO e
   DirectML passaram equivalência numérica com PyanNet de dimensões reais e pesos
   sintéticos (erro máximo 4,77e-7). Isso NÃO comprova qualidade de falantes treinados.
@@ -18,11 +30,18 @@ O pacote final está sendo reconstruído após a última correção de recupera�
 - Player RF64 e seek comparados amostra a amostra. Nenhum áudio pessoal foi usado.
 - Interfaces Tk renderizadas com biblioteca sintética e inspecionadas: filtros,
   seleção, cancelamento/retry, nomes de falantes, preparação e exportação.
+- UI do executável final inspecionada independentemente com biblioteca isolada:
+  rodapé completo, falantes legíveis, importação sem erro de carregamento do drag/drop
+  e fechamento com código zero. Configuração temporária retirada de `dist`.
 - Nemotron treinado: CPU e Intel Vulkan produziram 25 turnos/3 IDs na AMI pública
   de 60 s. DER com collar de 0,25 s: 13,574%; a quarta voz com duas intervenções
   breves não foi separada. Não representa acurácia universal nem valida português.
 - Pipeline real local completo com Whisper tiny e Nemotron: `ready`, 18 segmentos,
-  25 turnos e exportações TXT/SRT, sem credenciais externas.
+  25 turnos e exportações TXT/SRT, sem credenciais externas, também no executável final.
+- CAPI frozen independente: CPU 2,641 s / pico 209.489.920 bytes; Intel Vulkan
+  1,515 s / pico 268.623.872 bytes; ambos 25 turnos/3 IDs, divergência 0,021997%.
+- Preparo público sem token e recuperação de manifest `[]` passaram no executável;
+  CPU ONNX/OpenVINO CPU/OpenVINO Intel GPU/DirectML passaram no mesmo binário.
 - CAPI com um estado por gravação e leituras de 5 s: duas horas de silêncio em
   217,64 s, pico real do processo 207.106.048 bytes (197,5 MiB), nenhum turno falso.
 - AMI repetida por 30 min: 770 turnos/3 IDs, sem trocas de rótulos detectadas nos
@@ -34,8 +53,10 @@ O pacote final está sendo reconstruído após a última correção de recupera�
 
 `audit_updates` implementou T3 e revisou T1/T2. `capture_storage` implementou T1 e
 revisou T3 e integração/UI/configurações. `inspect_diarizer` implementou T2. O agente
-raiz implementou a integração e corrigiu os achados. Revisão independente do pacote
-final ainda pendente.
+raiz implementou a integração e corrigiu os achados. `capture_storage` concluiu a
+revisão independente do executável e dos hashes do pacote final; não restaram
+achados abertos no escopo verificado. Evidências detalhadas permanecem em
+`temp/independent-final-review/frozen-native-report.json` e logs de smoke em `temp`.
 
 Achados reproduzidos e corrigidos/revalidados:
 
@@ -79,9 +100,8 @@ Achados reproduzidos e corrigidos/revalidados:
   Revisão visual independente confirmou sete controles de rodapé visíveis em
   125%/150% e layout mínimo 850×590 em 100%. Configuração de DPI do Windows intacta.
 
-## Verificações ainda necessárias
+## Gates de publicação e verificações ainda necessárias
 
-- Candidato final reconstruído e revisão independente correspondente.
 - Qualidade treinada Community-1, português e cinco ou mais falantes substanciais.
   Community-1 exige aceite/token e permanece opcional. Nemotron treinado foi
   verificado apenas nos cenários públicos e sintéticos descritos acima.
