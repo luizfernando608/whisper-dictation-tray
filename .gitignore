@@ -11,3 +11,4 @@ dist/
 Output/
 *.spec
 whatsapp_export/
+.runtime-directml/

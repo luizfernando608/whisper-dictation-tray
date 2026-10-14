@@ -46,7 +46,7 @@ class RecordingStore:
             raise ValueError("Diretório de gravação fora da biblioteca.")
         return path
 
-    def create(self, title: str, origin: str) -> dict:
+    def create(self, title: str, origin: str, **fields) -> dict:
         if origin not in {"meeting", "import"}:
             raise ValueError("Origem de gravação inválida.")
         recording_id = uuid.uuid4().hex
@@ -54,6 +54,7 @@ class RecordingStore:
                       created_at=datetime.now(timezone.utc).isoformat(), duration=0.0,
                       status="new", progress=0.0, error=None, audio_path=None,
                       result_path=None, backend=None, speaker_names={})
+        record.update(self._validated_fields(recording_id, fields))
         directory = self.directory(recording_id)
         directory.mkdir()
         try:

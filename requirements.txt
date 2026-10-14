@@ -9,3 +9,12 @@ Pillow>=10.4,<12.0
 pyperclip>=1.9,<2.0
 keyring>=25.0,<26.0
 customtkinter>=5.2,<7.0
+av>=14,<19
+PyAudioWPatch>=0.2.12,<0.3
+tkinterdnd2>=0.6.4,<1
+pyannote.audio==4.0.7
+torch==2.11.0
+torchaudio==2.11.0
+onnx>=1.23,<2
+onnxruntime>=1.24,<2
+openvino>=2026.4,<2027

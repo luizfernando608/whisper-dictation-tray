@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "1.4.0"
+  #define AppVersion "1.5.0"
 #endif
 
 [Setup]
@@ -39,8 +39,10 @@ Source: "dist\Pace\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs cre
 [Icons]
 Name: "{group}\PACE"; Filename: "{app}\Pace.exe"
 Name: "{group}\PACE — Configurações"; Filename: "{app}\Pace.exe"; Parameters: "--settings"
+Name: "{group}\PACE — Gravações"; Filename: "{app}\Pace.exe"; Parameters: "--recordings"
 Name: "{userdesktop}\PACE"; Filename: "{app}\Pace.exe"
 Name: "{userdesktop}\PACE — Configurações"; Filename: "{app}\Pace.exe"; Parameters: "--settings"
+Name: "{userdesktop}\PACE — Gravações"; Filename: "{app}\Pace.exe"; Parameters: "--recordings"
 Name: "{userstartup}\PACE"; Filename: "{app}\Pace.exe"
 
 [Run]

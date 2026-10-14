@@ -10,6 +10,7 @@ control channel.
 from __future__ import annotations
 
 import os
+from dataclasses import asdict
 from pathlib import Path
 
 from whisper_dictation._version import __version__
@@ -20,6 +21,8 @@ from whisper_dictation.single_instance import (
     QUIT,
     RELOAD_CONFIG,
     send_command,
+    APPLY_UPDATE,
+    CAPABILITIES, SAVE_SETTINGS, request, probe,
 )
 
 
@@ -29,25 +32,44 @@ def run_settings_ui(project_root: Path) -> None:
     config = AppConfig.load(path)
     log_dir = logs_dir(project_root)
 
+    def can_save() -> bool:
+        from whisper_dictation.recording_store import RecordingStore, BUSY_STATUSES
+        from whisper_dictation.settings import recordings_dir
+        return not any(row["status"] in BUSY_STATUSES for row in RecordingStore(recordings_dir(config)).list())
+
     def on_save(new_config: AppConfig) -> bool:
+        if not can_save():
+            return False
         new_config.save(path)
         # Ask the running tray app to apply the new config immediately.
         send_command(RELOAD_CONFIG)
         return True
 
-    def run_update(update: object) -> None:
-        from whisper_dictation import updater
-
+    def commit(new_config: AppConfig, keys: dict[str, str]) -> bool:
         try:
-            updater.download_and_launch(update)  # type: ignore[arg-type]
-        except Exception:
-            return
-        send_command(QUIT)
+            capabilities = request(CAPABILITIES, timeout=3)
+        except ConnectionRefusedError:
+            from whisper_dictation.settings_commit import commit_settings
+            commit_settings(path, new_config, keys)
+            return True
+        if not capabilities.get("save_settings") or Path(capabilities.get("project_root", "")).resolve() != project_root.resolve():
+            raise RuntimeError("As configurações pertencem a outra instalação. Abra o PACE desta pasta.")
+        response = request({"command": SAVE_SETTINGS, "config": asdict(new_config), "keys": keys})
+        if not response.get("ok"):
+            raise RuntimeError(response.get("error", "Não foi possível salvar agora."))
+        return True
+
+    def run_update(update: object) -> None:
+        if not send_command(APPLY_UPDATE):
+            raise RuntimeError("Abra o PACE na bandeja antes de atualizar.")
 
     def check_update():
         from whisper_dictation import updater
 
-        return updater.check_for_update()
+        update = updater.check_for_update()
+        if update:
+            updater.prepare_update(update)
+        return update
 
     context = SettingsContext(
         version=__version__,
@@ -56,6 +78,8 @@ def run_settings_ui(project_root: Path) -> None:
         copy_last_transcript=lambda: send_command(COPY_LAST_TRANSCRIPT),
         check_update=check_update,
         run_update=run_update,
+        can_save=can_save,
+        commit_settings=commit,
     )
 
     run_settings_window(config, on_save, context)
