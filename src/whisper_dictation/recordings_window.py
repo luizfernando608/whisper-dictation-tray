@@ -17,7 +17,7 @@ from whisper_dictation.recording_store import RecordingStore
 from whisper_dictation.settings import AppConfig, config_path, recordings_dir
 from whisper_dictation.settings_window import COLOR_BG_ROOT, COLOR_BG_CARD, COLOR_TEXT_MAIN, COLOR_TEXT_MUTED, _find_asset
 from whisper_dictation.single_instance import MEETING_PAUSE, MEETING_TOGGLE, OPEN_SETTINGS, CAPABILITIES, IMPORT_MEDIA, request, send_command
-from whisper_dictation.ui_utils import close_window
+from whisper_dictation.ui_utils import close_window, fit_window
 
 STATUS = {"new": "Preparando gravação", "starting": "Iniciando gravação", "queued": "Na fila", "recording": "Gravando", "paused": "Pausada", "finalizing": "Salvando áudio",
           "processing": "Preparando", "importing": "Importando", "transcribing": "Transcrevendo",
@@ -49,14 +49,13 @@ class RecordingsWindow:
         ctk.set_appearance_mode("dark")
         self.root = ctk.CTk()
         self.root.title("PACE — Gravações")
-        self.root.geometry("1120x720")
-        self.root.minsize(850, 590)
         self.root.configure(fg_color=COLOR_BG_ROOT)
         icon = _find_asset("assets/branding/pace.ico")
         if icon:
             self.root.iconbitmap(str(icon))
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self._build()
+        fit_window(self.root)
         try:
             from tkinterdnd2 import DND_FILES, TkinterDnD
             TkinterDnD.require(self.root)

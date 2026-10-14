@@ -48,5 +48,5 @@ revisão. Não encerrar entrega com falhas relevantes abertas.
 - T3: implementada, testes e revisão independente concluídos. Upgrade real de
   instalação anterior permanece gate de publicação; não executar no app do usuário.
 - T4: implementada; integração/UI/IPC/configurações revisadas com correções revalidadas.
-- T5: 108 testes sem skips, compileall e runtimes sintéticos passaram. Pacote final
+- T5: 109 testes sem skips, compileall e runtimes sintéticos passaram. Pacote final
   em reconstrução/validação; limitações de hardware e gates de publicação no relatório.

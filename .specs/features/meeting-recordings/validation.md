@@ -5,7 +5,7 @@ O pacote final está sendo reconstruído após a última correção de recupera�
 
 ## Evidências
 
-- 108 testes passaram com `PACE_RUN_MODEL_SMOKE=1` e `PYTHONPATH=src` em 2026-10-14.
+- 109 testes passaram com `PACE_RUN_MODEL_SMOKE=1` e `PYTHONPATH=src` em 2026-10-14.
 - `pip check`: sem dependências quebradas. ORT CPU no ambiente principal; DirectML
   fica em wheel isolada e só é importado pelo subprocesso específico.
 - PyInstaller e Inno Setup geraram um primeiro candidato. O código recebeu ajustes
@@ -74,6 +74,10 @@ Achados reproduzidos e corrigidos/revalidados:
   medição no processo que hospeda DLL e encerramento da árvore própria.
 - Leitura de progresso impedindo replace no Windows: progresso advisory não
   interrompe inferência/preparo; resultado final é persistido separadamente.
+- Janela da biblioteca fora da tela em 125%/150%: dimensões lógicas adaptadas à
+  workarea física do monitor e posição centralizada com margem para decoração.
+  Revisão visual independente confirmou sete controles de rodapé visíveis em
+  125%/150% e layout mínimo 850×590 em 100%. Configuração de DPI do Windows intacta.
 
 ## Verificações ainda necessárias
 

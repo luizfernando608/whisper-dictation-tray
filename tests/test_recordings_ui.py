@@ -12,10 +12,36 @@ from whisper_dictation.recording_store import RecordingStore
 from whisper_dictation.recordings_window import RecordingsWindow
 from whisper_dictation.settings import AppConfig
 from whisper_dictation.settings_window import SettingsContext, _run_window, _build_meeting_tab
-from whisper_dictation.ui_utils import close_window
+from whisper_dictation.ui_utils import close_window, fit_window
 
 
 class RecordingsUITests(unittest.TestCase):
+    def test_scaled_window_keeps_all_export_and_action_buttons_in_work_area(self):
+        import customtkinter as ctk
+        labels = {"Copiar", "Exportar texto", "Exportar áudio", "Renomear", "Tentar novamente", "Cancelar tarefa", "Excluir"}
+        def descendants(widget):
+            for child in widget.winfo_children():
+                yield child
+                yield from descendants(child)
+        try:
+            for scaling in (1.25, 1.5):
+                ctk.set_window_scaling(scaling)
+                ctk.set_widget_scaling(scaling)
+                with patch("whisper_dictation.ui_utils.window_work_area", return_value=(0, 0, 1920, 1040)):
+                    fit_window(self.window.root)
+                self.window.root.deiconify()
+                self.window.root.update()
+                found = []
+                for button in descendants(self.window.root):
+                    if isinstance(button, ctk.CTkButton) and button.cget("text") in labels:
+                        found.append(button.cget("text"))
+                        self.assertLessEqual(button.winfo_rooty() + button.winfo_height(), 1040, (scaling, button.cget("text")))
+                        self.assertGreaterEqual(button.winfo_rooty(), 0)
+                self.assertEqual(set(found), labels)
+        finally:
+            ctk.set_window_scaling(1)
+            ctk.set_widget_scaling(1)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.directory = Path(self.temp.name)
