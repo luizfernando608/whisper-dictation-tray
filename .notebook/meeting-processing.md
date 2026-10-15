@@ -5,3 +5,5 @@
 `meeting_processing.py:_process_sources()` mantém ASR/checkpoints/diarização por fonte e publica IDs globais. Nunca associar palavras contra turnos das duas fontes juntos: sobreposição verdadeira vira falsa ambiguidade. `_write_result()` preserva nomes só quando turnos e namespace continuam iguais; caso contrário arquiva os nomes junto ao resultado anterior.
 
 Validação e limitações: `.specs/features/meeting-recordings/overlap-validation.md`. As duas fontes não equivalem a duas pessoas. Modelos maiores não substituem referência humana; melhorar captura por fontes não resolve duas vozes dentro da mesma faixa. Cache de modelos de prévia deve ficar em dados permanentes do usuário.
+
+`recordings_window.py:refresh_detail()` vincula cada segmento renderizado aos seus tempos com tags Tk. `transcript_release()` navega apenas em cliques sem arrasto/seleção e preserva reprodução ou pausa. `update_playback()` destaca todos os segmentos ativos, incluindo sobreposição; a tag `sel` deve ter prioridade acima de `playing` e `found`. Sem rolagem automática para preservar leitura e busca.

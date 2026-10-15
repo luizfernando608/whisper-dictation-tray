@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import time
@@ -62,6 +63,9 @@ class RecordingsWindow:
         self._menus = {}
         self._title_value = ""
         self._compact = None
+        self._transcript_segments = {}
+        self._transcript_press = None
+        self._active_segments = ()
         ctk.set_appearance_mode("dark")
         self.root = ctk.CTk()
         self.root.title("PACE — Gravações")
@@ -182,6 +186,13 @@ class RecordingsWindow:
         self.text.tag_configure("speaker", foreground="#E4EAF6", spacing1=12, spacing3=7)
         self.text.tag_configure("time", foreground="#78869E")
         self.text.tag_configure("muted", foreground=MUTED)
+        self.text.tag_configure("playing", background="#1E2C43")
+        self.text.tag_raise("found")
+        self.text.tag_raise("sel")
+        self.text.tag_bind("seekable", "<Enter>", lambda _: self.text.configure(cursor="hand2"))
+        self.text.tag_bind("seekable", "<Leave>", lambda _: self.text.configure(cursor="arrow"))
+        self.text.bind("<ButtonPress-1>", self.transcript_press, add="+")
+        self.text.bind("<ButtonRelease-1>", self.transcript_release, add="+")
         self.main.bind("<Configure>", self.resize_detail)
         self.root.bind("<Control-f>", lambda _: self.toggle_find(True))
 
@@ -497,6 +508,7 @@ class RecordingsWindow:
         self.empty_state.place(relx=.5, rely=.43, anchor="center")
         self.toggle_find(False)
         self.text.configure(state="normal")
+        self.clear_transcript_links()
         self.text.delete("1.0", "end")
         self.text.configure(state="disabled")
 
@@ -533,17 +545,27 @@ class RecordingsWindow:
             except (OSError, ValueError):
                 self.result = {}
             self.text.configure(state="normal")
+            self.clear_transcript_links()
             self.text.delete("1.0", "end")
             names = row.get("speaker_names") or {}
             previous = None
             for index, segment in enumerate(self.result.get("segments", [])):
                 speaker = segment.get("speaker")
+                if index and speaker != previous:
+                    self.text.insert("end", "\n")
+                segment_start = self.text.index("end-1c")
                 if not index or speaker != previous:
-                    if index:
-                        self.text.insert("end", "\n")
                     self.text.insert("end", names.get(speaker, speaker_label(speaker)), "speaker")
                     self.text.insert("end", f"    {short_time(segment.get('start', 0))}\n", "time")
-                self.text.insert("end", segment.get("text", "").strip() + "\n")
+                self.text.insert("end", segment.get("text", "").strip())
+                segment_end = self.text.index("end-1c")
+                start, end = float(segment.get("start", 0)), float(segment.get("end", 0))
+                if math.isfinite(start) and math.isfinite(end) and 0 <= start < end:
+                    tag = f"transcript_segment_{index}"
+                    self._transcript_segments[tag] = (start, end)
+                    self.text.tag_add(tag, segment_start, segment_end)
+                    self.text.tag_add("seekable", segment_start, segment_end)
+                self.text.insert("end", "\n")
                 previous = speaker
             if not self.result.get("segments"):
                 placeholder = "A transcrição aparecerá aqui quando estiver pronta."
@@ -574,6 +596,57 @@ class RecordingsWindow:
         self.copy_button.configure(state="normal" if self.has_transcript() else "disabled")
         self.export_button.configure(state="normal" if self.result or self.player.path else "disabled")
         self.seek.configure(state="normal" if self.player.path else "disabled")
+        self.update_playback()
+
+    def clear_transcript_links(self):
+        for tag in self._transcript_segments:
+            self.text.tag_delete(tag)
+        self._transcript_segments.clear()
+        self._transcript_press = None
+        self._active_segments = ()
+        self.text.tag_remove("seekable", "1.0", "end")
+        self.text.tag_remove("playing", "1.0", "end")
+        self.text.configure(cursor="arrow")
+
+    def transcript_segment_at(self, x, y):
+        index = self.text.index(f"@{x},{y}")
+        bounds = self.text.bbox(index)
+        # Tk snaps coordinates in the margins to the closest character.
+        if not bounds or not (bounds[0] <= x < bounds[0] + bounds[2] and bounds[1] <= y < bounds[1] + bounds[3]):
+            return None
+        return next((tag for tag in self.text.tag_names(index) if tag in self._transcript_segments), None)
+
+    def transcript_press(self, event):
+        self._transcript_press = (event.x, event.y, self.transcript_segment_at(event.x, event.y))
+
+    def transcript_release(self, event):
+        press, self._transcript_press = self._transcript_press, None
+        if not press or not press[2] or self.text.tag_ranges("sel"):
+            return
+        if abs(event.x - press[0]) > 4 or abs(event.y - press[1]) > 4:
+            return
+        if self.transcript_segment_at(event.x, event.y) != press[2]:
+            return
+        state = read_runtime(self.store_root)
+        if not self.player.path or state.get("active") or state.get("finalizing"):
+            return
+        try:
+            self.player.seek(self._transcript_segments[press[2]][0])
+            self.update_playback()
+        except Exception as exc:
+            messagebox.showerror("Áudio", str(exc), parent=self.root)
+
+    def update_playback(self):
+        position = self.player.position
+        self.seek.set(position)
+        self.clock.configure(text=f"{short_time(position)} / {short_time(self.player.duration)}")
+        active = tuple(tag for tag, (start, end) in self._transcript_segments.items()
+                       if self.player.path and start <= position < end)
+        if active != self._active_segments:
+            self.text.tag_remove("playing", "1.0", "end")
+            for tag in active:
+                self.text.tag_add("playing", *self.text.tag_ranges(tag))
+            self._active_segments = active
 
     def refresh(self):
         if self._closing:
@@ -596,8 +669,7 @@ class RecordingsWindow:
             self.play_button.configure(text="Ⅱ" if self.player.playing else "▶", state="disabled" if active or not self.player.path else "normal")
             if active and self.player.playing:
                 self.player.toggle()
-            self.seek.set(self.player.position)
-            self.clock.configure(text=f"{short_time(self.player.position)} / {short_time(self.player.duration)}")
+            self.update_playback()
         except Exception as exc:
             self.set_notice(f"Não foi possível atualizar a biblioteca: {exc}")
         self.root.after(600, self.refresh)

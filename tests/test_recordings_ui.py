@@ -205,6 +205,94 @@ class RecordingsUITests(unittest.TestCase):
             self.window.copy()
             clear.assert_not_called()
 
+    def prepare_clickable_transcript(self):
+        row = self.window.row()
+        folder = self.store.directory(row["id"])
+        self.window.player.close()
+        with PCM16WaveWriter(folder / "audio.wav") as writer:
+            writer.writeframesraw(np.zeros(16000 * 30, dtype="<i2").tobytes())
+        segments = [
+            {"start": 1, "end": 4, "speaker": "SPEAKER_00", "text": "Primeiro trecho da conversa."},
+            {"start": 7.25, "end": 10, "speaker": "SPEAKER_00", "text": "Segundo trecho da mesma pessoa."},
+            {"start": 8, "end": 11, "speaker": None, "text": "Uma fala simultânea sem identificação."},
+            {"start": 16, "end": 20, "speaker": "SPEAKER_01", "text": "Outro participante responde."},
+        ]
+        (folder / "result.json").write_text(json.dumps({"segments": segments}), encoding="utf-8")
+        self.window.refresh_detail()
+        self.window.root.deiconify()
+        self.window.root.update()
+
+    def transcript_coordinates(self, needle):
+        index = self.window.text.search(needle, "1.0", stopindex="end")
+        self.assertTrue(index, needle)
+        self.window.text.see(index)
+        self.window.root.update()
+        x, y, width, height = self.window.text.bbox(index)
+        return x + width // 2, y + height // 2
+
+    def click_transcript(self, needle):
+        x, y = self.transcript_coordinates(needle)
+        self.window.text.event_generate("<ButtonPress-1>", x=x, y=y)
+        self.window.text.event_generate("<ButtonRelease-1>", x=x, y=y)
+        self.window.root.update()
+
+    def test_click_text_or_timestamp_seeks_exact_segment_without_starting_paused_audio(self):
+        self.prepare_clickable_transcript()
+        for text, position in (("Segundo", 7.25), ("Uma fala", 8), ("00:16", 16), ("Primeiro", 1)):
+            self.click_transcript(text)
+            self.assertAlmostEqual(self.window.player.position, position)
+            self.assertAlmostEqual(self.window.seek.get(), position)
+            self.assertFalse(self.window.player.playing)
+            self.assertTrue(self.window.text.tag_ranges("playing"))
+        self.assertEqual(self.window.clock.cget("text"), "00:01 / 00:30")
+
+    def test_click_preserves_playing_state_and_capture_blocks_transcript_seek(self):
+        self.prepare_clickable_transcript()
+        with patch.object(self.window.player, "_stream", Mock(active=True)) as stream:
+            self.click_transcript("Segundo")
+            self.assertTrue(self.window.player.playing)
+            stream.stop.assert_not_called()
+            stream.start.assert_not_called()
+        for runtime in ({"active": True}, {"active": True, "paused": True}, {"finalizing": True}):
+            with patch("whisper_dictation.recordings_window.read_runtime", return_value=runtime):
+                self.click_transcript("Outro participante")
+                self.assertAlmostEqual(self.window.player.position, 7.25)
+
+    def test_drag_selection_and_empty_space_do_not_seek(self):
+        self.prepare_clickable_transcript()
+        self.window.player.seek(7.25)
+        self.window.update_playback()
+        x, y = self.transcript_coordinates("Segundo")
+        target_x, target_y = self.transcript_coordinates("trecho da mesma")
+        self.window.text.event_generate("<ButtonPress-1>", x=x, y=y)
+        self.window.text.event_generate("<B1-Motion>", x=target_x, y=target_y)
+        self.window.text.event_generate("<ButtonRelease-1>", x=target_x, y=target_y)
+        self.assertTrue(self.window.text.tag_ranges("sel"))
+        priorities = self.window.text.tag_names()
+        self.assertGreater(priorities.index("sel"), priorities.index("playing"))
+        self.assertEqual(self.window.player.position, 7.25)
+        x = self.window.text.winfo_width() - 30
+        self.window.text.event_generate("<ButtonPress-1>", x=x, y=y)
+        self.window.text.event_generate("<ButtonRelease-1>", x=x, y=y)
+        self.assertEqual(self.window.player.position, 7.25)
+
+    def test_highlight_tracks_overlaps_and_gaps_and_links_reset_on_record_change(self):
+        self.prepare_clickable_transcript()
+        self.window.player.seek(8.5)
+        self.window.update_playback()
+        highlighted = self.window.text.tag_ranges("playing")
+        self.assertEqual(len(highlighted), 4)
+        self.window.player.seek(12)
+        self.window.update_playback()
+        self.assertFalse(self.window.text.tag_ranges("playing"))
+        other = next(row for row in self.rows if row["id"] != self.window.selected)
+        self.window.select_recording(other["id"])
+        self.assertEqual(len(self.window._transcript_segments), 1)
+        self.assertNotIn("transcript_segment_3", self.window.text.tag_names())
+        self.window.clear_selection()
+        self.assertFalse(self.window._transcript_segments)
+        self.assertFalse(self.window.text.tag_ranges("playing"))
+
     def test_refresh_preserves_card_keyboard_focus(self):
         self.window.root.deiconify()
         self.window.root.update()
