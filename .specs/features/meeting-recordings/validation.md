@@ -137,3 +137,20 @@ deste documento é anterior a essa revisão e deve ser regenerado antes de publi
   aplicações: `temp/ui-recordings-redesign-final.png`,
   `temp/ui-recordings-empty-final.png`, `temp/ui-recordings-failure-final.png`.
 - A revisão da fonte não substitui ensaios físicos de captura/atualização pendentes.
+
+### Executável da prévia redesenhada
+
+- PyInstaller concluído em 465,6 s; fonte equivalente ao commit `755df59`.
+  Os code objects arquivados de `recordings_window` e `ui_utils` foram comparados
+  diretamente com a compilação das fontes revisadas: igualdade confirmada.
+- SHA-256 do novo `dist/Pace/Pace.exe` e da cópia portátil:
+  `6B21D344640C215E8BFDD88871B8B500EB1559E0E2E6B73CBA6CA09A1AB7F622`.
+- Prévia em `%LOCALAPPDATA%/PACE-Preview-1.5.0`, aberta em 2026-10-15
+  00:48:36 UTC (2026-10-14 21:48:36 local). Processo principal e biblioteca visível
+  confirmados; IPC retorna versão 1.5.0 e o diretório esperado.
+- Antes da substituição do executável portátil, captura/finalização/fila e ditado
+  foram confirmados ociosos. Janela fechada normalmente e serviço encerrado pelo
+  IPC; cópia anterior preservada em `temp/redesign-backup/Pace.exe` da própria
+  prévia. Configurações e biblioteca preservadas; instalação principal intacta.
+- Somente a prévia portátil foi atualizada. O instalador `Output/Pace_Installer.exe`
+  permanece no candidato anterior e precisa ser regerado antes da publicação.
