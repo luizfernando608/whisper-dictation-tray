@@ -50,6 +50,9 @@ def merge_transcript(transcript: dict, turns: list[dict]) -> list[dict]:
         else:
             words.append({"start": segment["start"], "end": segment["end"], "text": segment["text"]})
     result = []
+    # The overlap cursor must see one chronological timeline, including words
+    # from interleaved local/legacy segments.
+    words.sort(key=lambda word: float(word["start"]))
     ordered = sorted(turns, key=lambda turn: turn["start"])
     cursor = 0
     for word in words:
@@ -197,25 +200,71 @@ def _transcribe_chunk(path: Path, duration: float, config, provider: str, model_
         response = clients[provider].audio.transcriptions.create(
             file=stream, timeout=max(config.groq_timeout_seconds, 60.0 + duration * 0.15), **request,
         )
-    words = _get(response, "words", []) or []
-    segments = []
-    for segment in (_get(response, "segments", []) or []):
-        start, end = float(_get(segment, "start")), float(_get(segment, "end"))
-        segment_words = []
-        for word in words:
-            wstart, wend = float(_get(word, "start")), float(_get(word, "end"))
-            if start <= (wstart + wend) / 2 < end:
-                segment_words.append({"start": wstart, "end": wend, "word": str(_get(word, "word", ""))})
-        segments.append({"start": start, "end": end, "text": str(_get(segment, "text", "")), "words": segment_words})
-    if not segments and words:
-        segments = [{"start": float(_get(words[0], "start")), "end": float(_get(words[-1], "end")),
-                     "text": str(_get(response, "text", "")),
-                     "words": [{"start": float(_get(w, "start")), "end": float(_get(w, "end")),
-                                "word": str(_get(w, "word", ""))} for w in words]}]
+    # Preserve the SDK response before interpreting its timeline. Projecting a
+    # global word into every matching segment duplicates it when segments overlap
+    # and drops words that fall outside the provider's segment boundaries.
+    words = [{"start": _get(word, "start"), "end": _get(word, "end"), "word": str(_get(word, "word", ""))}
+             for word in (_get(response, "words", []) or [])]
+    segments = [{"start": _get(segment, "start"), "end": _get(segment, "end"), "text": str(_get(segment, "text", "")), "words": []}
+                for segment in (_get(response, "segments", []) or [])]
     text = _clean(str(_get(response, "text", "") or ""))
-    if text and not segments:
+    if text and not segments and not words:
         raise RuntimeError(f"{provider}/{model_name} não retornou timestamps. Escolha uma alternativa compatível.")
-    return {"text": text, "segments": segments, "language": str(_get(response, "language", language or "auto"))}
+    return {"text": text, "segments": segments, "words": words,
+            "language": str(_get(response, "language", language or "auto"))}
+
+
+def _normalise_transcript(transcript: dict, duration: float) -> dict:
+    """Use each genuine word once, stable in time; never invent word alignment."""
+    if not isinstance(transcript, dict) or not isinstance(transcript.get("segments"), list):
+        raise ValueError("Formato de transcrição inválido.")
+    if any(not isinstance(segment, dict) for segment in transcript["segments"]):
+        raise ValueError("Formato de segmento inválido.")
+
+    def interval(item):
+        try:
+            start, end = float(item["start"]), float(item["end"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Provedor retornou timestamps inválidos.") from exc
+        if not (math.isfinite(start) and math.isfinite(end) and 0 <= start <= end <= duration + .5):
+            raise ValueError("Provedor retornou timestamps fora da faixa de áudio.")
+        return start, end
+
+    global_words = transcript.get("words") or []
+    words, segments = [], []
+    sources = [global_words] if global_words else [segment.get("words") or [] for segment in transcript["segments"]]
+    for source in sources:
+        if not isinstance(source, list):
+            raise ValueError("Formato de palavras inválido.")
+        for word in source:
+            start, end = interval(word)
+            words.append({**word, "start": start, "end": end})
+    # Sorting by start only keeps provider order for equal timestamps, including
+    # legitimate identical repeated words. No deduplication or time clamping.
+    words.sort(key=lambda word: word["start"])
+    coarse = []
+    for segment in transcript["segments"]:
+        if not global_words and segment.get("words"):
+            continue
+        start, end = interval(segment)
+        if global_words and any(
+            min(end, word["end"]) > max(start, word["start"]) or
+            (word["start"] == word["end"] and start <= word["start"] <= end)
+            for word in words
+        ):
+            continue
+        coarse.append({**segment, "start": start, "end": end, "words": []})
+    if words and not coarse:
+        text = _clean(" ".join(str(word["word"]) for word in words))
+        segments = [{"start": words[0]["start"], "end": max(word["end"] for word in words), "text": text, "words": words}]
+    else:
+        # Mixed legacy/local results may contain coarse segments without words.
+        # Keep each coarse block intact, interleaving it with genuinely timed words.
+        segments = [{"start": word["start"], "end": word["end"], "text": str(word["word"]), "words": [word]} for word in words]
+        segments.extend(coarse)
+        segments.sort(key=lambda segment: segment["start"])
+    return {"text": _clean(" ".join(segment["text"] for segment in segments)), "segments": segments,
+            "language": transcript.get("language", "auto")}
 
 
 def _validate_transcript(transcript: dict, duration: float) -> None:
@@ -250,20 +299,29 @@ def transcribe_recording(audio: Path, directory: Path, config, cancellation: _Fi
     try:
         for index, offset, length, path in _chunks(audio, directory, cancellation):
             checkpoint = directory / f"transcript-{index:05d}.json"
+            raw_checkpoint = directory / f"transcript-{index:05d}.raw.json"
             partial = None
-            if checkpoint.exists():
+            # Prefer the original response so changes to normalization can be
+            # replayed locally. Legacy validated checkpoints remain reusable.
+            for candidate in (raw_checkpoint, checkpoint):
+                if not candidate.exists():
+                    continue
                 try:
-                    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
-                    if saved.get("fingerprint") == fingerprint:
-                        _validate_transcript(saved["transcript"], length)
-                        partial = saved["transcript"]
+                    saved = json.loads(candidate.read_text(encoding="utf-8"))
+                    if isinstance(saved, dict) and saved.get("fingerprint") == fingerprint:
+                        restored = _normalise_transcript(saved["transcript"], length)
+                        _validate_transcript(restored, length)
+                        partial = restored
+                        break
                 except (ValueError, OSError, KeyError, TypeError):
                     pass
             if partial is None:
                 cancellation.check()
-                partial = _transcribe_chunk(path, length, config, provider, model_name, clients, model_root(config))
+                raw = _transcribe_chunk(path, length, config, provider, model_name, clients, model_root(config))
+                atomic_json(raw_checkpoint, {"fingerprint": fingerprint, "transcript": raw})
+                partial = _normalise_transcript(raw, length)
                 _validate_transcript(partial, length)
-                atomic_json(checkpoint, {"fingerprint": fingerprint, "transcript": partial})
+            atomic_json(checkpoint, {"fingerprint": fingerprint, "transcript": partial})
             language = partial.get("language", language)
             for segment in partial["segments"]:
                 adjusted = {**segment, "start": segment["start"] + offset, "end": segment["end"] + offset,

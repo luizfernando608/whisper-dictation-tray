@@ -6,7 +6,7 @@ import unittest
 import wave
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 
@@ -22,6 +22,65 @@ def make_audio(path: Path, seconds: float):
 
 
 class MeetingProcessingTests(unittest.TestCase):
+    def cloud_response(self, response, duration=4):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            audio = root / "audio.wav"
+            make_audio(audio, duration)
+            client = Mock()
+            client.audio.transcriptions.create.return_value = response
+            raw = module._transcribe_chunk(audio, duration, AppConfig(), "groq", "whisper-large-v3", {"groq": client}, root)
+            result = module._normalise_transcript(raw, duration)
+            module._validate_transcript(result, duration)
+            return result
+
+    def test_overlapping_provider_segments_never_duplicate_global_words(self):
+        response = {"text": "a b c d", "language": "pt", "segments": [
+            {"start": 0, "end": 2, "text": "a b c"}, {"start": 1, "end": 3, "text": "b c d"}],
+            "words": [{"start": start, "end": start + .2, "word": word}
+                      for start, word in ((.2, "a"), (1.2, "b"), (1.7, "c"), (2.2, "d"))]}
+        result = self.cloud_response(response)
+        merged = module.merge_transcript(result, [{"start": 0, "end": 4, "speaker": "A"}])
+        self.assertEqual(merged[0]["text"], "a b c d")
+        self.assertEqual(len(result["segments"][0]["words"]), 4)
+
+    def test_unsorted_orphan_and_identical_words_are_preserved_stably(self):
+        result = self.cloud_response({"text": "a a b c", "segments": [{"start": 0, "end": 1, "text": "a"}],
+                                      "words": [{"start": 2, "end": 2.3, "word": "c"},
+                                                {"start": 0, "end": .2, "word": "a"},
+                                                {"start": 0, "end": .2, "word": "a"},
+                                                {"start": 1, "end": 1.2, "word": "b"}]})
+        self.assertEqual([w["word"] for w in result["segments"][0]["words"]], ["a", "a", "b", "c"])
+
+    def test_normalisation_still_rejects_invalid_provider_intervals(self):
+        for start, end in ((float("nan"), 1), (0, float("inf")), (2, 1), (-.1, 1), (0, 5), (None, 1)):
+            with self.subTest(start=start, end=end), self.assertRaises(ValueError):
+                self.cloud_response({"text": "a", "words": [{"start": start, "end": end, "word": "a"}]})
+
+    def test_segments_without_words_are_sorted_without_inventing_word_alignment(self):
+        result = self.cloud_response({"text": "a b", "segments": [{"start": 2, "end": 3, "text": "b"},
+                                                                 {"start": 0, "end": 1, "text": "a"}]})
+        self.assertEqual([s["text"] for s in result["segments"]], ["a", "b"])
+        self.assertFalse(any(s.get("words") for s in result["segments"]))
+
+    def test_partial_global_words_preserve_uncovered_coarse_segments(self):
+        result = self.cloud_response({"text": "a b", "segments": [{"start": 0, "end": 1, "text": "a"},
+                                                                 {"start": 2, "end": 3, "text": "b"}],
+                                      "words": [{"start": .2, "end": .4, "word": "a"}]})
+        self.assertEqual(result["text"], "a b")
+        merged = module.merge_transcript(result, [{"start": 0, "end": 1, "speaker": "A"}, {"start": 2, "end": 3, "speaker": "B"}])
+        self.assertEqual([(s["text"], s["speaker"]) for s in merged], [("a", "A"), ("b", "B")])
+        self.assertFalse(result["segments"][-1].get("words"))
+
+    def test_nested_local_words_are_globally_ordered_for_diarization(self):
+        raw = {"text": "a b c", "segments": [
+            {"start": 0, "end": 3, "text": "a c", "words": [{"start": 0, "end": .5, "word": "a"}, {"start": 2, "end": 3, "word": "c"}]},
+            {"start": 1, "end": 2, "text": "b", "words": [{"start": 1, "end": 2, "word": "b"}]}]}
+        result = module._normalise_transcript(raw, 3)
+        module._validate_transcript(result, 3)
+        merged = module.merge_transcript(result, [{"start": 0, "end": 1, "speaker": "A"}, {"start": 1, "end": 3, "speaker": "B"}])
+        self.assertEqual([(s["text"], s["speaker"]) for s in merged], [("a", "A"), ("b c", "B")])
+
     def test_local_asr_uses_shared_cache_without_community_model(self):
         from unittest.mock import Mock
         with tempfile.TemporaryDirectory() as directory:
@@ -100,6 +159,67 @@ class MeetingProcessingTests(unittest.TestCase):
             self.assertEqual(first, second)
             self.assertEqual(second["segments"][0]["start"], 0.2)
             self.assertTrue((root / "transcript.partial.json").exists())
+
+    def test_raw_response_survives_normalisation_failure_and_is_replayed_without_api(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            audio = root / "audio.wav"
+            make_audio(audio, 2)
+            checkpoints = root / "checkpoints"
+            config = AppConfig(transcription_provider="groq")
+            cancel = module._FileCancellation(root / "cancel.request")
+            response = {"text": "a b", "segments": [], "words": [
+                {"start": 1, "end": 1.5, "word": "b"}, {"start": 0, "end": .5, "word": "a"}], "language": "pt"}
+            with patch.object(module, "_transcribe_chunk", return_value=response) as call, \
+                    patch.object(module, "_normalise_transcript", side_effect=ValueError("old normalizer")):
+                with self.assertRaises(ValueError):
+                    module.transcribe_recording(audio, checkpoints, config, cancel)
+                call.assert_called_once()
+            self.assertTrue((checkpoints / "transcript-00000.raw.json").exists())
+            with patch.object(module, "_transcribe_chunk") as call:
+                result = module.transcribe_recording(audio, checkpoints, config, cancel)
+                call.assert_not_called()
+            self.assertEqual(result["text"], "a b")
+            # Invalidating normalization alone never changes the ASR fingerprint;
+            # changing the actual model does require a fresh provider response.
+            config.groq_model = "whisper-large-v3-turbo"
+            with patch.object(module, "_transcribe_chunk", return_value=response) as call:
+                module.transcribe_recording(audio, checkpoints, config, cancel)
+                call.assert_called_once()
+
+    def test_invalid_raw_timestamps_are_preserved_but_retry_fetches_fresh_response(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            audio = root / "audio.wav"
+            make_audio(audio, 2)
+            config = AppConfig(transcription_provider="groq")
+            cancel = module._FileCancellation(root / "cancel.request")
+            checkpoints = root / "checkpoints"
+            invalid = {"text": "a", "segments": [], "words": [{"start": -1, "end": 1, "word": "a"}]}
+            with patch.object(module, "_transcribe_chunk", return_value=invalid):
+                with self.assertRaisesRegex(ValueError, "faixa"):
+                    module.transcribe_recording(audio, checkpoints, config, cancel)
+            valid = {**invalid, "words": [{"start": 0, "end": 1, "word": "a"}]}
+            with patch.object(module, "_transcribe_chunk", return_value=valid) as call:
+                result = module.transcribe_recording(audio, checkpoints, config, cancel)
+                call.assert_called_once()
+            self.assertEqual(result["text"], "a")
+
+    def test_legacy_checkpoint_remains_reusable_without_new_raw_response(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            audio = root / "audio.wav"
+            make_audio(audio, 2)
+            config = AppConfig(transcription_provider="groq")
+            cancel = module._FileCancellation(root / "cancel.request")
+            response = {"text": "a", "segments": [{"start": 0, "end": 1, "text": "a", "words": []}]}
+            with patch.object(module, "_transcribe_chunk", return_value=response):
+                module.transcribe_recording(audio, root / "checkpoints", config, cancel)
+            (root / "checkpoints/transcript-00000.raw.json").unlink()
+            with patch.object(module, "_transcribe_chunk") as call:
+                result = module.transcribe_recording(audio, root / "checkpoints", config, cancel)
+                call.assert_not_called()
+            self.assertEqual(result["text"], "a")
 
     def test_failed_diarization_keeps_transcript_and_never_marks_ready(self):
         from whisper_dictation.recording_store import RecordingStore
