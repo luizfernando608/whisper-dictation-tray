@@ -52,3 +52,7 @@ revisão. Não encerrar entrega com falhas relevantes abertas.
   PyInstaller/Inno, pipeline local real no frozen, quatro runtimes sintéticos e
   revisão independente de CPU/Vulkan/UI/hashes. Hardware e upgrade reais continuam
   gates de publicação explícitos no relatório, sem aprovação além do que foi testado.
+- T6: revisão visual solicitada pelo usuário implementada no commit `33f0660`;
+  biblioteca lateral, transcrição tipográfica, player e menus contextuais. Revisão
+  independente e 16 ensaios de UI aprovados; validação e decisões nos documentos
+  `validation.md` e `design-refinement.md`. Regerar instalador antes da publicação.

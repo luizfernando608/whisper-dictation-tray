@@ -111,3 +111,29 @@ Achados reproduzidos e corrigidos/revalidados:
   controlados e verificam integridade, espera, flags, recuperação e preservação.
 - GPUs AMD/NVIDIA não disponíveis nesta máquina. Não declarar esses dispositivos
   como testados apenas porque um backend os suporta em princípio.
+
+## Revisão visual posterior — 2026-10-14
+
+A pedido do usuário, a biblioteca foi redesenhada no commit `33f0660`.
+As decisões estão em `design-refinement.md`. O instalador identificado no início
+deste documento é anterior a essa revisão e deve ser regenerado antes de publicar.
+
+- Suíte geral: 118 testes em 29,003 s, 117 aprovados e um smoke de modelos opcional
+  não habilitado (`PACE_RUN_MODEL_SMOKE`). Os modelos não foram alterados por esta
+  revisão visual. A validação anterior desses runtimes permanece descrita acima.
+- Após o último refinamento da barra de rolagem, 16 testes reais de interface
+  aprovados em 20,496 s; compileall e diff-check aprovados.
+- Revisão independente concluída sem P1/P2 abertos. Exportações TXT/WAV escritas
+  e conferidas; renomear, cancelar, repetir e excluir exercitados com arquivos
+  sintéticos. Cliques reais com animação CTk, Tab, setas, Escape e alternância
+  rápida dos menus sem bgerrors Tcl.
+- Títulos de 124/288 caracteres preservados integralmente e apresentados em até
+  duas linhas. Foco e seleção mantidos ao atualizar a lista; ações desabilitadas
+  puladas no percurso de Tab. Transcrição vazia não apaga o clipboard.
+- No mínimo 850×590 com título de duas linhas, captura pausada, aviso e busca
+  abertos: documento com 99/128/169 px em 100%/125%/150%, controles acessíveis.
+  Espaçamentos compactos persistem após mudança de escala CTk.
+- Capturas visuais da própria janela com dados sintéticos, sem capturar outras
+  aplicações: `temp/ui-recordings-redesign-final.png`,
+  `temp/ui-recordings-empty-final.png`, `temp/ui-recordings-failure-final.png`.
+- A revisão da fonte não substitui ensaios físicos de captura/atualização pendentes.
