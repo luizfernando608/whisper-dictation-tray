@@ -44,7 +44,7 @@ try {
         --collect-all faster_whisper --collect-all ctranslate2 --collect-all av `
         --collect-all customtkinter --collect-all keyring --collect-all win32ctypes `
         --collect-all numpy `
-        --collect-all pyaudiowpatch --collect-all tkinterdnd2 `
+        --collect-all pyaudiowpatch --collect-all tkinterdnd2 --collect-all aec_audio_processing `
         --collect-all pyannote.audio --collect-all pyannote.core --collect-all pyannote.pipeline `
         --collect-all torch --collect-all torchaudio --collect-all torchcodec `
         --collect-all onnx --collect-all onnxruntime --collect-all openvino `

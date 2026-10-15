@@ -11,6 +11,7 @@ keyring>=25.0,<26.0
 customtkinter>=5.2,<7.0
 av>=14,<19
 PyAudioWPatch>=0.2.12,<0.3
+aec-audio-processing==1.0.1; sys_platform == "win32"
 tkinterdnd2>=0.6.4,<1
 pyannote.audio==4.0.7
 torch==2.11.0

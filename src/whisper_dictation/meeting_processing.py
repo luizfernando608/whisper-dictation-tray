@@ -5,6 +5,7 @@ import hashlib
 import json
 import math
 import re
+import uuid
 import wave
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from whisper_dictation import secrets_store
 from whisper_dictation.diarization import (
     ProcessingCancelled, atomic_json, diarize, model_root, _hash,
 )
+from whisper_dictation.meeting_sources import SPEECH_PACKING, pack_speech, prepare_sources, restore_speech
 from whisper_dictation.settings import AppConfig, load_env_file
 
 
@@ -287,15 +289,29 @@ def _validate_transcript(transcript: dict, duration: float) -> None:
 
 
 def transcribe_recording(audio: Path, directory: Path, config, cancellation: _FileCancellation,
-                         progress=None) -> dict:
+                         progress=None, *, partial_callback=None, speech_only=False) -> dict:
     provider, model_name, warning = _effective_provider(config)
     signature = {"schema": 1, "audio_sha256": _hash(audio),
                  "provider": provider, "model": model_name, "language": config.language,
                  "beam": config.beam_size, "vad": config.vad_min_silence_ms, "chunk_seconds": 300}
+    if speech_only:
+        signature["speech_only"] = SPEECH_PACKING
     fingerprint = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
     directory.mkdir(exist_ok=True)
     clients, collected = {}, []
     language, total_duration = config.language, 0.0
+
+    def restore_raw(saved, length):
+        if not speech_only:
+            return _normalise_transcript(saved["transcript"], length)
+        packed_duration = float(saved["packed_duration"])
+        if not math.isfinite(packed_duration) or not 0 <= packed_duration <= length:
+            raise ValueError("Duração de fala compactada inválida.")
+        packed = _normalise_transcript(saved["transcript"], packed_duration)
+        _validate_transcript(packed, packed_duration)
+        restored = restore_speech(packed, saved["speech_map"])
+        return _normalise_transcript(restored, length)
+
     try:
         for index, offset, length, path in _chunks(audio, directory, cancellation):
             checkpoint = directory / f"transcript-{index:05d}.json"
@@ -309,7 +325,8 @@ def transcribe_recording(audio: Path, directory: Path, config, cancellation: _Fi
                 try:
                     saved = json.loads(candidate.read_text(encoding="utf-8"))
                     if isinstance(saved, dict) and saved.get("fingerprint") == fingerprint:
-                        restored = _normalise_transcript(saved["transcript"], length)
+                        restored = (restore_raw(saved, length) if candidate == raw_checkpoint else
+                                    _normalise_transcript(saved["transcript"], length))
                         _validate_transcript(restored, length)
                         partial = restored
                         break
@@ -317,9 +334,26 @@ def transcribe_recording(audio: Path, directory: Path, config, cancellation: _Fi
                     pass
             if partial is None:
                 cancellation.check()
-                raw = _transcribe_chunk(path, length, config, provider, model_name, clients, model_root(config))
-                atomic_json(raw_checkpoint, {"fingerprint": fingerprint, "transcript": raw})
-                partial = _normalise_transcript(raw, length)
+                saved = {"fingerprint": fingerprint}
+                if speech_only:
+                    destination = directory / f"speech-{index:05d}.wav"
+                    try:
+                        packed = pack_speech(path, destination, cancellation)
+                        cancellation.check()
+                        packed_duration = float(packed["duration"])
+                        if packed_duration > 0:
+                            raw = _transcribe_chunk(Path(packed["audio"]), packed_duration, config, provider,
+                                                    model_name, clients, model_root(config))
+                        else:
+                            raw = {"text": "", "segments": [], "language": language}
+                        saved.update(transcript=raw, speech_map=packed["chunks"], packed_duration=packed_duration)
+                    finally:
+                        destination.unlink(missing_ok=True)
+                else:
+                    saved["transcript"] = _transcribe_chunk(path, length, config, provider, model_name,
+                                                             clients, model_root(config))
+                atomic_json(raw_checkpoint, saved)
+                partial = restore_raw(saved, length)
                 _validate_transcript(partial, length)
             atomic_json(checkpoint, {"fingerprint": fingerprint, "transcript": partial})
             language = partial.get("language", language)
@@ -333,6 +367,8 @@ def transcribe_recording(audio: Path, directory: Path, config, cancellation: _Fi
                               "provider": provider, "model": model_name, "warning": warning,
                               "duration": total_duration, "language": language, "partial": True}
             atomic_json(directory.parent / "transcript.partial.json", partial_result)
+            if partial_callback:
+                partial_callback(partial_result)
             if progress:
                 progress(total_duration)
             cancellation.check()
@@ -346,6 +382,144 @@ def transcribe_recording(audio: Path, directory: Path, config, cancellation: _Fi
     return {"text": _clean(" ".join(s["text"] for s in collected)), "segments": collected,
             "provider": provider, "model": model_name, "warning": warning,
             "duration": total_duration, "language": language}
+
+
+def _combined_transcript(transcripts: dict[str, dict]) -> dict:
+    """Keep source timelines aligned without removing simultaneous words."""
+    first = next(iter(transcripts.values()))
+    pieces = []
+    for source, transcript in transcripts.items():
+        for segment in transcript["segments"]:
+            if segment.get("words"):
+                pieces.extend({"start": word["start"], "end": word["end"], "text": word["word"],
+                               "words": [word], "source": source} for word in segment["words"])
+            else:
+                pieces.append({**segment, "source": source})
+    segments = sorted(pieces, key=lambda segment: segment["start"])
+    warnings = list(dict.fromkeys(transcript["warning"] for transcript in transcripts.values()
+                                 if transcript.get("warning")))
+    return {"text": _clean(" ".join(segment["text"] for segment in segments)), "segments": segments,
+            "provider": first["provider"], "model": first["model"], "language": first["language"],
+            "duration": max(transcript["duration"] for transcript in transcripts.values()),
+            "warning": "; ".join(warnings)}
+
+
+def _process_sources(prepared: dict, directory: Path, record: dict, config, cancellation,
+                     store, recording_id: str) -> dict:
+    transcripts, diarizations = {}, {}
+    sources = prepared["sources"]
+    names = [name for name in ("microphone", "computer") if name in sources]
+    if len(names) != 2:
+        raise ValueError("Preparação de fontes não retornou as duas faixas verificadas.")
+    warnings = list(prepared.get("warnings", []))
+    progress_value = 0.0
+
+    def update_progress(value, stage):
+        nonlocal progress_value
+        progress_value = max(progress_value, min(.95, max(0.0, value)))
+        store.update(recording_id, status="processing", progress=progress_value, stage=stage,
+                     partial_result_path=str(directory / "transcript.partial.json"))
+
+    def save_partial(source, partial):
+        combined = _combined_transcript({**transcripts, source: partial})
+        combined["partial"] = True
+        atomic_json(directory / "transcript.partial.json", combined)
+
+    for index, name in enumerate(names):
+        cancellation.check()
+        source_directory = directory / "sources" / name
+        source_directory.mkdir(parents=True, exist_ok=True)
+        label = "Microfone" if name == "microphone" else "Computador"
+        base, width = index * .95 / len(names), .95 / len(names)
+        duration = float(record.get("duration") or 0)
+
+        def transcript_progress(seconds):
+            fraction = seconds / max(seconds, duration, .001)
+            update_progress(base + width * .7 * fraction, f"Transcrevendo · {label}")
+
+        update_progress(base, f"Transcrevendo · {label}")
+        transcript = transcribe_recording(
+            Path(sources[name]), source_directory / "transcription-checkpoints", config, cancellation,
+            transcript_progress, partial_callback=lambda partial: save_partial(name, partial),
+            speech_only=name == "microphone",
+        )
+        cancellation.check()
+        transcripts[name] = transcript
+        atomic_json(source_directory / "transcript.json", transcript)
+        save_partial(name, transcript)
+        update_progress(base + width * .7, f"Identificando falantes · {label}")
+
+        def diarization_progress(stage, fraction):
+            update_progress(base + width * (.7 + .3 * min(1.0, max(0.0, fraction))), f"{stage} · {label}")
+
+        diarizations[name] = diarize(Path(sources[name]), config, source_directory,
+                                    diarization_progress, cancellation.is_set)
+        cancellation.check()
+        update_progress(base + width, f"Identificando falantes · {label}")
+
+    # Namespaces are independent even when two channels use the same model label.
+    # Order public IDs by the earliest real turn, not the channel's label number.
+    identities = {}
+    for name in names:
+        for turn in diarizations[name]["turns"]:
+            key = (name, turn["speaker"])
+            identities[key] = min(identities.get(key, float("inf")), turn["start"])
+    speaker_map = {key: f"SPEAKER_{index:02d}" for index, key in
+                   enumerate(sorted(identities, key=identities.get))}
+    segments, turns, exclusive = [], [], []
+    reasons = [record["fallback_reason"]] if record.get("fallback_reason") else []
+    backends = {}
+    for name in names:
+        result = diarizations[name]
+        # Match words only against their own source's voices. A combined overlap
+        # scorer would incorrectly turn valid cross-source speech into ambiguity.
+        for segment in merge_transcript(transcripts[name], result["turns"]):
+            local = segment["speaker"]
+            segments.append({**segment, "speaker": speaker_map[(name, local)] if local is not None else None,
+                             "source": name})
+        for key, target in (("turns", turns), ("exclusive_turns", exclusive)):
+            target.extend({**turn, "speaker": speaker_map[(name, turn["speaker"])], "source": name}
+                          for turn in result.get(key, []))
+        backends[name] = {key: value for key, value in result.items() if key not in {"turns", "exclusive_turns"}}
+        reasons.extend(f"{name}: {reason}" for reason in result.get("fallback_reasons", []))
+    for sequence in (segments, turns, exclusive):
+        sequence.sort(key=lambda item: item["start"])
+    combined = _combined_transcript(transcripts)
+    if combined["warning"]:
+        warnings.append(combined["warning"])
+    warnings = list(dict.fromkeys(warnings))
+    combined["warning"] = "; ".join(warnings)
+    combined["processing"] = prepared.get("processing", {})
+    atomic_json(directory / "transcript.json", combined)
+    first_result = diarizations[names[0]]
+    backend_names = list(dict.fromkeys(result["backend"] for result in diarizations.values()))
+    return {"schema": 1, "text": _clean(" ".join(segment["text"] for segment in segments)),
+            "segments": segments, "turns": turns, "exclusive_turns": exclusive,
+            "speaker_sources": {speaker: source for (source, _), speaker in speaker_map.items()},
+            "processing": {**prepared.get("processing", {}), "mode": "separate_sources",
+                           "source_order": names, "warning_count": len(warnings)},
+            "source_backends": backends, "backend": "; ".join(backend_names),
+            "fallback_reasons": reasons, "warnings": warnings, "duration": combined["duration"],
+            "language": combined["language"], "transcription_provider": combined["provider"],
+            "transcription_model": combined["model"], "transcription_warning": combined["warning"],
+            "diarization_model": first_result.get("model", ""), "license": first_result.get("license", "")}
+
+
+def _write_result(directory: Path, record: dict, output: dict, store) -> None:
+    """Do not attach names to a different voice after a model/mode change."""
+    names = record.get("speaker_names") or {}
+    if names:
+        try:
+            previous = json.loads((directory / "result.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            previous = None
+        unchanged = (isinstance(previous, dict) and previous.get("turns") == output.get("turns") and
+                     previous.get("speaker_sources") == output.get("speaker_sources"))
+        if not unchanged:
+            atomic_json(directory / f"speaker-names-{uuid.uuid4().hex}.json",
+                        {"speaker_names": names, "result": previous})
+            store.update(record["id"], speaker_names={})
+    atomic_json(directory / "result.json", output)
 
 
 def process_recording(store_root, recording_id: str, config_path) -> dict | None:
@@ -372,6 +546,32 @@ def process_recording(store_root, recording_id: str, config_path) -> dict | None
             store.update(recording_id, audio_path=str(audio), duration=duration)
         if not audio.is_file():
             raise RuntimeError("Áudio da gravação não foi encontrado.")
+        guided_count = any(int(record.get(key) if record.get(key) is not None else
+                               getattr(config, "diarization_" + key, 0) or 0) > 0
+                           for key in ("num_speakers", "min_speakers", "max_speakers"))
+        source_warning = ""
+        source_processing, source_warnings = None, []
+        if record.get("origin") == "meeting" and guided_count:
+            source_warning = ("Quantidade de falantes definida: processamento usa o áudio misturado, "
+                              "pois esse total não pode ser aplicado independentemente a cada fonte.")
+        if record.get("origin") == "meeting" and not guided_count:
+            store.update(recording_id, status="processing", progress=0.0, error="", stage="Preparando fontes de áudio")
+            prepared = prepare_sources(audio, directory, cancellation,
+                lambda message, fraction: store.update(recording_id, stage=f"{message} ({fraction:.0%})"))
+            cancellation.check()
+            if prepared is not None and prepared.get("sources"):
+                output = _process_sources(prepared, directory, record, config, cancellation, store, recording_id)
+                cancellation.check()
+                _write_result(directory, record, output, store)
+                store.update(recording_id, status="ready", progress=1.0, error="", stage="Concluído",
+                             duration=output["duration"], result_path=str(directory / "result.json"),
+                             transcription_warning=output["transcription_warning"], backend=output["backend"],
+                             fallback_reason="; ".join(output["fallback_reasons"]))
+                return output
+            if prepared is not None:
+                source_processing = prepared.get("processing", {})
+                source_warnings = prepared.get("warnings", [])
+                source_warning = "; ".join(source_warnings)
         store.update(recording_id, status="transcribing", progress=0.0, error="", stage="Transcrevendo")
         def transcript_progress(seconds):
             duration = float(store.get(recording_id).get("duration") or seconds)
@@ -379,6 +579,8 @@ def process_recording(store_root, recording_id: str, config_path) -> dict | None
                          stage="Transcrevendo", partial_result_path=str(directory / "transcript.partial.json"))
         transcript = transcribe_recording(audio, directory / "transcription-checkpoints", config,
                                          cancellation, transcript_progress)
+        if source_warning:
+            transcript["warning"] = "; ".join(filter(None, (transcript.get("warning", ""), source_warning)))
         cancellation.check()
         atomic_json(directory / "transcript.json", transcript)
         store.update(recording_id, status="diarizing", progress=0.65, stage="Identificando falantes",
@@ -397,10 +599,13 @@ def process_recording(store_root, recording_id: str, config_path) -> dict | None
                   "language": transcript["language"], "transcription_provider": transcript["provider"],
                   "transcription_model": transcript["model"], "transcription_warning": transcript.get("warning", ""),
                   "diarization_model": result.get("model", ""), "license": result.get("license", "")}
+        if source_processing is not None:
+            output["processing"] = source_processing
+            output["warnings"] = source_warnings
         for key in ("device_log", "benchmark_seconds"):
             if key in result:
                 output[key] = result[key]
-        atomic_json(directory / "result.json", output)
+        _write_result(directory, record, output, store)
         store.update(recording_id, status="ready", progress=1.0, error="", stage="Concluído",
                      duration=transcript["duration"], result_path=str(directory / "result.json"),
                      backend=result["backend"], fallback_reason="; ".join(reasons))

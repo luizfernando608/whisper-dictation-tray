@@ -22,6 +22,45 @@ def make_audio(path: Path, seconds: float):
 
 
 class MeetingProcessingTests(unittest.TestCase):
+    def test_changed_speaker_identity_archives_names_before_clearing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            previous = {"turns": [{"start": 0, "end": 1, "speaker": "SPEAKER_00"}]}
+            (root / "result.json").write_text(json.dumps(previous))
+            record = {"id": "test", "speaker_names": {"SPEAKER_00": "Previous participant"}}
+            output = {"turns": [{"start": 0, "end": 1, "speaker": "SPEAKER_00", "source": "microphone"}],
+                      "speaker_sources": {"SPEAKER_00": "microphone"}}
+            store = Mock()
+            module._write_result(root, record, output, store)
+            store.update.assert_called_once_with("test", speaker_names={})
+            archives = list(root.glob("speaker-names-*.json"))
+            self.assertEqual(len(archives), 1)
+            archive = json.loads(archives[0].read_text())
+            self.assertEqual(archive["speaker_names"], record["speaker_names"])
+            self.assertEqual(archive["result"], previous)
+            self.assertEqual(json.loads((root / "result.json").read_text()), output)
+
+    def test_unchanged_speaker_turns_preserve_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = {"turns": [{"start": 0, "end": 1, "speaker": "SPEAKER_00"}]}
+            (root / "result.json").write_text(json.dumps(output))
+            store = Mock()
+            module._write_result(root, {"id": "test", "speaker_names": {"SPEAKER_00": "Name"}}, output, store)
+            store.update.assert_not_called()
+            self.assertEqual(list(root.glob("speaker-names-*.json")), [])
+
+    def test_combined_source_transcript_orders_words_across_source_segments(self):
+        shared = {"provider": "groq", "model": "whisper-large-v3", "language": "pt", "duration": 5}
+        combined = module._combined_transcript({
+            "microphone": {**shared, "text": "a c", "segments": [
+                {"start": 0, "end": 5, "text": "a c", "words": [
+                    {"start": 0, "end": 1, "word": "a"}, {"start": 4, "end": 5, "word": "c"}]}]},
+            "computer": {**shared, "text": "b", "segments": [
+                {"start": 2, "end": 3, "text": "b", "words": [{"start": 2, "end": 3, "word": "b"}]}]}})
+        self.assertEqual(combined["text"], "a b c")
+        self.assertEqual([s["source"] for s in combined["segments"]], ["microphone", "computer", "microphone"])
+
     def cloud_response(self, response, duration=4):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -256,6 +295,264 @@ class MeetingProcessingTests(unittest.TestCase):
                 module.process_recording(store.root, record["id"], config_path)
             transcribe.assert_not_called()
             self.assertEqual(store.get(record["id"])["status"], "cancelled")
+
+
+class SourceProcessingTests(unittest.TestCase):
+    def setUp(self):
+        from whisper_dictation.recording_store import RecordingStore
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.config_path = self.root / "config.json"
+        AppConfig().save(self.config_path)
+        self.store = RecordingStore(self.root / "library")
+        self.record = self.store.create("source test", "meeting")
+        self.folder = self.store.directory(self.record["id"])
+        self.audio = self.folder / "audio.wav"
+        make_audio(self.audio, 4)
+        self.store.update(self.record["id"], audio_path=str(self.audio), duration=4)
+        self.sources = {}
+        for name in ("microphone", "computer"):
+            path = self.folder / f"{name}.wav"
+            make_audio(path, 4)
+            self.sources[name] = path
+        self.prepared = {"sources": self.sources, "processing": {"echo_reduction": "verified"}, "warnings": []}
+        # These orchestration fixtures intentionally use silent WAVs. Keep their
+        # source plumbing independent of VAD decisions, tested separately below.
+        packer = patch.object(module, "pack_speech", create=True,
+                              side_effect=lambda audio, destination, cancellation:
+                              {"audio": audio, "duration": 4, "chunks": [{"start": 0, "end": 64000}]})
+        packer.start()
+        self.addCleanup(packer.stop)
+
+    @staticmethod
+    def transcript(name):
+        words = [{"start": .2, "end": .7, "word": name + " first"},
+                 {"start": 2.2, "end": 2.7, "word": name + " second"}]
+        return {"text": " ".join(word["word"] for word in words), "segments": [
+            {"start": word["start"], "end": word["end"], "text": word["word"], "words": [word]}
+            for word in words], "provider": "groq", "model": "whisper-large-v3", "duration": 4, "language": "pt"}
+
+    @staticmethod
+    def diarization(name):
+        return {"turns": [{"start": 0, "end": 1, "speaker": "SPEAKER_00"},
+                          {"start": 2, "end": 3, "speaker": "SPEAKER_01"}],
+                "exclusive_turns": [], "backend": name + "-cpu", "model": "nemotron",
+                "license": "OpenMDW", "fallback_reasons": [], "benchmark_seconds": {"cpu": .1}}
+
+    def run_processing(self):
+        return module.process_recording(self.store.root, self.record["id"], self.config_path)
+
+    def test_simultaneous_words_keep_source_and_four_distinct_identities(self):
+        updates = []
+        original_update = self.store.update
+        def capture_update(store, recording_id, **fields):
+            updates.append(fields)
+            return original_update(recording_id, **fields)
+        def transcribe(audio, directory, config, cancellation, progress=None, **kwargs):
+            if progress:
+                progress(2)
+                progress(4)
+            return self.transcript(audio.stem)
+        def diarization(audio, config, directory, progress, cancelled, **kwargs):
+            progress("Identificando", .5)
+            progress("Identificando", 1)
+            return self.diarization(audio.stem)
+        with patch.object(module, "prepare_sources", return_value=self.prepared, create=True), \
+                patch.object(module, "transcribe_recording", side_effect=transcribe), \
+                patch.object(module, "diarize", side_effect=diarization), \
+                patch("whisper_dictation.recording_store.RecordingStore.update", new=capture_update):
+            output = self.run_processing()
+        self.assertIsNotNone(output)
+        self.assertEqual(len(output["segments"]), 4)
+        self.assertEqual(len({segment["speaker"] for segment in output["segments"]}), 4)
+        self.assertEqual([segment["source"] for segment in output["segments"]],
+                         ["microphone", "computer", "microphone", "computer"])
+        self.assertEqual([segment["speaker"] for segment in output["segments"]],
+                         ["SPEAKER_00", "SPEAKER_01", "SPEAKER_02", "SPEAKER_03"])
+        self.assertEqual({turn["source"] for turn in output["turns"]}, {"microphone", "computer"})
+        self.assertEqual(output["speaker_sources"]["SPEAKER_01"], "computer")
+        self.assertEqual(output["processing"]["echo_reduction"], "verified")
+        self.assertEqual(set(output["source_backends"]), {"microphone", "computer"})
+        self.assertEqual(output["source_backends"]["microphone"]["backend"], "microphone-cpu")
+        self.assertEqual(self.store.get(self.record["id"])["status"], "ready")
+        progress = [update["progress"] for update in updates if "progress" in update]
+        self.assertEqual(progress, sorted(progress))
+
+    def test_import_and_unverified_sources_keep_mixed_flow(self):
+        for origin, prepared in (("import", self.prepared), ("meeting", None)):
+            with self.subTest(origin=origin):
+                self.store.update(self.record["id"], origin=origin)
+                with patch.object(module, "prepare_sources", return_value=prepared, create=True) as prepare, \
+                        patch.object(module, "transcribe_recording", return_value=self.transcript("mixed")) as transcribe, \
+                        patch.object(module, "diarize", return_value=self.diarization("mixed")) as diarization:
+                    output = self.run_processing()
+                self.assertEqual(transcribe.call_args.args[0], self.audio)
+                self.assertEqual(diarization.call_args.args[0], self.audio)
+                self.assertNotIn("source", output["segments"][0])
+                if origin == "import":
+                    prepare.assert_not_called()
+
+    def test_guided_counts_use_mixed_flow_with_visible_warning(self):
+        for count_origin in ("record", "config"):
+            with self.subTest(count_origin=count_origin):
+                self.store.update(self.record["id"], num_speakers=3 if count_origin == "record" else None)
+                AppConfig(diarization_min_speakers=2 if count_origin == "config" else 0).save(self.config_path)
+                with patch.object(module, "prepare_sources", return_value=self.prepared, create=True) as prepare, \
+                        patch.object(module, "transcribe_recording", return_value=self.transcript("mixed")) as transcribe, \
+                        patch.object(module, "diarize", return_value=self.diarization("mixed")):
+                    output = self.run_processing()
+                prepare.assert_not_called()
+                self.assertEqual(transcribe.call_args.args[0], self.audio)
+                self.assertIn("falantes", output["transcription_warning"])
+                self.assertIn("mistur", output["transcription_warning"])
+
+    def test_unavailable_echo_runtime_keeps_mixed_flow_and_diagnostics(self):
+        warning = "Cancelamento de eco indisponível; usando áudio misturado: ImportError."
+        prepared = {"sources": {}, "processing": {"mode": "mixed", "reason": "aec-unavailable"},
+                    "warnings": [warning]}
+        with patch.object(module, "prepare_sources", return_value=prepared), \
+                patch.object(module, "transcribe_recording", return_value=self.transcript("mixed")) as transcribe, \
+                patch.object(module, "diarize", return_value=self.diarization("mixed")):
+            output = self.run_processing()
+        self.assertIsNotNone(output)
+        self.assertEqual(transcribe.call_args.args[0], self.audio)
+        self.assertEqual(output["processing"]["reason"], "aec-unavailable")
+        self.assertEqual(output["warnings"], [warning])
+        self.assertEqual(output["transcription_warning"], warning)
+        self.assertEqual(self.store.get(self.record["id"])["transcription_warning"], warning)
+        self.assertEqual(self.store.get(self.record["id"])["status"], "ready")
+
+    def test_source_failure_keeps_parent_partial_and_never_ready(self):
+        def transcribe(audio, directory, config, cancellation, progress=None, **kwargs):
+            if audio.stem == "computer":
+                raise RuntimeError("second source failed")
+            return self.transcript(audio.stem)
+        with patch.object(module, "prepare_sources", return_value=self.prepared, create=True), \
+                patch.object(module, "transcribe_recording", side_effect=transcribe), \
+                patch.object(module, "diarize", return_value=self.diarization("microphone")):
+            self.assertIsNone(self.run_processing())
+        self.assertEqual(self.store.get(self.record["id"])["status"], "failed")
+        partial = json.loads((self.folder / "transcript.partial.json").read_text(encoding="utf-8"))
+        self.assertIn("microphone", partial["text"])
+        self.assertTrue(partial["partial"])
+        self.assertFalse((self.folder / "result.json").exists())
+        self.assertEqual(Path(self.store.get(self.record["id"])["partial_result_path"]), self.folder / "transcript.partial.json")
+
+    def test_real_source_checkpoints_resume_without_repeating_asr_calls(self):
+        response = {"text": "hello", "language": "pt", "segments": [
+            {"start": .2, "end": .7, "text": "hello", "words": [{"start": .2, "end": .7, "word": "hello"}]}]}
+        with patch.object(module, "prepare_sources", return_value=self.prepared, create=True), \
+                patch.object(module, "_transcribe_chunk", return_value=response) as transcribe, \
+                patch.object(module, "diarize", return_value=self.diarization("local")):
+            first = self.run_processing()
+            second = self.run_processing()
+        self.assertEqual(transcribe.call_count, 2)
+        self.assertEqual(first, second)
+        for name in self.sources:
+            self.assertTrue((self.folder / "sources" / name / "transcription-checkpoints" / "transcript-00000.raw.json").is_file())
+        partial = json.loads((self.folder / "transcript.partial.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(partial["segments"]), 2)
+        self.assertEqual({segment["source"] for segment in partial["segments"]}, set(self.sources))
+
+    def test_cancelled_source_keeps_checkpoints_and_never_ready(self):
+        response = {"text": "hello", "language": "pt", "segments": [
+            {"start": .2, "end": .7, "text": "hello", "words": [{"start": .2, "end": .7, "word": "hello"}]}]}
+        def cancelled_diarization(*args, **kwargs):
+            (self.folder / "cancel.request").touch()
+            return self.diarization("local")
+        with patch.object(module, "prepare_sources", return_value=self.prepared, create=True), \
+                patch.object(module, "_transcribe_chunk", return_value=response) as transcribe, \
+                patch.object(module, "diarize", side_effect=cancelled_diarization):
+            self.assertIsNone(self.run_processing())
+        self.assertEqual(self.store.get(self.record["id"])["status"], "cancelled")
+        self.assertFalse((self.folder / "result.json").exists())
+        checkpoint = self.folder / "sources/microphone/transcription-checkpoints/transcript-00000.raw.json"
+        self.assertTrue(checkpoint.is_file())
+        (self.folder / "cancel.request").unlink()
+        with patch.object(module, "prepare_sources", return_value=self.prepared, create=True), \
+                patch.object(module, "_transcribe_chunk", return_value=response) as transcribe, \
+                patch.object(module, "diarize", return_value=self.diarization("local")):
+            self.assertIsNotNone(self.run_processing())
+            self.assertEqual(transcribe.call_count, 1)
+
+
+class SpeechOnlyTranscriptionTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.audio = self.root / "audio.wav"
+        make_audio(self.audio, 10)
+        self.checkpoints = self.root / "checkpoints"
+        self.config = AppConfig(transcription_provider="groq")
+        self.cancellation = module._FileCancellation(self.root / "cancel.request")
+        self.speech_map = [{"start": 16000, "end": 32000}, {"start": 112000, "end": 128000}]
+        self.packed = {"audio": self.root / "packed.wav", "duration": 2, "chunks": self.speech_map}
+        self.response = {"text": "first second", "segments": [], "words": [
+            {"start": .2, "end": .6, "word": "first"}, {"start": 1.2, "end": 1.6, "word": "second"}], "language": "pt"}
+
+    def transcribe(self, **kwargs):
+        return module.transcribe_recording(self.audio, self.checkpoints, self.config, self.cancellation,
+                                           speech_only=True, **kwargs)
+
+    def test_packed_words_restore_original_times_and_duration(self):
+        progress = []
+        with patch.object(module, "pack_speech", return_value=self.packed, create=True), \
+                patch.object(module, "_transcribe_chunk", return_value=self.response) as provider:
+            result = self.transcribe(progress=progress.append)
+        self.assertEqual(provider.call_args.args[:2], (self.packed["audio"], 2))
+        words = result["segments"][0]["words"]
+        self.assertEqual([word["start"] for word in words], [1.2, 7.2])
+        self.assertEqual([word["end"] for word in words], [1.6, 7.6])
+        self.assertEqual(result["duration"], 10)
+        self.assertEqual(progress, [10])
+
+    def test_packed_coarse_segments_restore_without_inventing_words(self):
+        response = {"text": "first second", "segments": [
+            {"start": .2, "end": .6, "text": "first"}, {"start": 1.2, "end": 1.6, "text": "second"}], "language": "pt"}
+        with patch.object(module, "pack_speech", return_value=self.packed, create=True), \
+                patch.object(module, "_transcribe_chunk", return_value=response):
+            result = self.transcribe()
+        self.assertEqual([segment["start"] for segment in result["segments"]], [1.2, 7.2])
+        self.assertFalse(any(segment.get("words") for segment in result["segments"]))
+
+    def test_empty_speech_never_calls_provider_and_replays_empty_checkpoint(self):
+        packed = {"audio": self.root / "empty.wav", "duration": 0, "chunks": []}
+        with patch.object(module, "pack_speech", return_value=packed, create=True) as pack, \
+                patch.object(module, "_transcribe_chunk") as provider:
+            first = self.transcribe()
+            second = self.transcribe()
+        provider.assert_not_called()
+        pack.assert_called_once()
+        self.assertEqual(first, second)
+        self.assertEqual(first["text"], "")
+        self.assertEqual(first["segments"], [])
+        self.assertEqual(first["duration"], 10)
+
+    def test_raw_checkpoint_keeps_provider_times_and_map_and_replays(self):
+        with patch.object(module, "pack_speech", return_value=self.packed, create=True), \
+                patch.object(module, "_transcribe_chunk", return_value=self.response):
+            first = self.transcribe()
+        raw = json.loads((self.checkpoints / "transcript-00000.raw.json").read_text(encoding="utf-8"))
+        self.assertEqual(raw["transcript"], self.response)
+        self.assertEqual(raw["speech_map"], self.speech_map)
+        self.assertEqual(raw["packed_duration"], 2)
+        (self.checkpoints / "transcript-00000.json").unlink()
+        with patch.object(module, "pack_speech", create=True) as pack, patch.object(module, "_transcribe_chunk") as provider:
+            second = self.transcribe()
+        pack.assert_not_called()
+        provider.assert_not_called()
+        self.assertEqual(first, second)
+
+    def test_packed_timestamps_are_validated_before_mapping(self):
+        invalid = {**self.response, "words": [{"start": 2.5, "end": 3, "word": "invalid"}]}
+        with patch.object(module, "pack_speech", return_value=self.packed, create=True), \
+                patch.object(module, "_transcribe_chunk", return_value=invalid), \
+                self.assertRaisesRegex(ValueError, "faixa"):
+            self.transcribe()
+        self.assertTrue((self.checkpoints / "transcript-00000.raw.json").is_file())
+        self.assertFalse((self.checkpoints / "transcript-00000.json").exists())
 
 
 if __name__ == "__main__":
