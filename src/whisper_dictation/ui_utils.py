@@ -45,7 +45,10 @@ def fit_window(root, preferred=(1120, 720), minimum=(850, 590)):
 def close_window(root):
     try:
         for token in root.tk.splitlist(root.tk.call("after", "info")):
-            root.after_cancel(token)
+            # Widgets such as CTkTextbox register timers on themselves. Calling
+            # root.after_cancel also deletes their Tcl command from the wrong
+            # owner; its later destroy would try to delete the command twice.
+            root.tk.call("after", "cancel", token)
     except tk.TclError:
         pass
     root.destroy()

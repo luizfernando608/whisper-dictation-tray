@@ -16,13 +16,8 @@ from whisper_dictation.ui_utils import close_window, fit_window
 
 
 class RecordingsUITests(unittest.TestCase):
-    def test_scaled_window_keeps_all_export_and_action_buttons_in_work_area(self):
+    def test_scaled_window_keeps_primary_controls_and_document_in_work_area(self):
         import customtkinter as ctk
-        labels = {"Copiar", "Exportar texto", "Exportar áudio", "Renomear", "Tentar novamente", "Cancelar tarefa", "Excluir"}
-        def descendants(widget):
-            for child in widget.winfo_children():
-                yield child
-                yield from descendants(child)
         try:
             for scaling in (1.25, 1.5):
                 ctk.set_window_scaling(scaling)
@@ -31,13 +26,15 @@ class RecordingsUITests(unittest.TestCase):
                     fit_window(self.window.root)
                 self.window.root.deiconify()
                 self.window.root.update()
-                found = []
-                for button in descendants(self.window.root):
-                    if isinstance(button, ctk.CTkButton) and button.cget("text") in labels:
-                        found.append(button.cget("text"))
-                        self.assertLessEqual(button.winfo_rooty() + button.winfo_height(), 1040, (scaling, button.cget("text")))
-                        self.assertGreaterEqual(button.winfo_rooty(), 0)
-                self.assertEqual(set(found), labels)
+                for widget in (self.window.record_button, self.window.import_button, self.window.play_button,
+                               self.window.copy_button, self.window.export_button, self.window.more_button, self.window.document):
+                    self.assertTrue(widget.winfo_ismapped(), (scaling, str(widget), widget.__class__.__name__))
+                    self.assertLessEqual(widget.winfo_rooty() + widget.winfo_height(), 1040, scaling)
+                    self.assertGreaterEqual(widget.winfo_rooty(), 0)
+                    self.assertLessEqual(widget.winfo_rootx() + widget.winfo_width(), 1920, scaling)
+                self.assertGreater(self.window.document.winfo_height(), 150)
+                self.assertEqual(len(self.window.menu_actions("export")), 2)
+                self.assertEqual(len(self.window.menu_actions("more")), 7)
         finally:
             ctk.set_window_scaling(1)
             ctk.set_widget_scaling(1)
@@ -60,6 +57,10 @@ class RecordingsUITests(unittest.TestCase):
             self.rows.append(row)
         self.load = patch("whisper_dictation.recordings_window.AppConfig.load", return_value=self.config)
         self.load.start()
+        # These fixtures simulate physical 100/125/150% independently of the
+        # desktop's current DPI (otherwise 150% on a 300% monitor becomes 450%).
+        self.dpi = patch("customtkinter.ScalingTracker.get_window_dpi_scaling", return_value=1)
+        self.dpi.start()
         self.window = RecordingsWindow(self.directory)
         self.window.root.withdraw()
         self.window.refresh_list()
@@ -68,16 +69,15 @@ class RecordingsUITests(unittest.TestCase):
     def tearDown(self):
         self.window.close()
         self.load.stop()
+        self.dpi.stop()
         self.temp.cleanup()
 
     def test_filter_selects_visible_item_and_never_exports_hidden_previous_record(self):
-        self.window.tree.selection_set(self.rows[0]["id"])
-        self.window.select()
+        self.window.select_recording(self.rows[0]["id"])
         self.assertEqual(self.window.selected, self.rows[0]["id"])
         self.window.search.insert(0, "B")
         self.window.refresh_list()
         self.window.root.update()
-        self.window.select()
         self.assertEqual(self.window.selected, self.rows[1]["id"])
         self.assertIn("Reunião B", self.window.text.get("1.0", "end"))
         self.assertIn("Falante 1", self.window.text.get("1.0", "end"))
@@ -91,8 +91,7 @@ class RecordingsUITests(unittest.TestCase):
 
     def test_cancel_and_retry_preserve_audio_and_use_record_state(self):
         row = self.rows[0]
-        self.window.tree.selection_set(row["id"])
-        self.window.select()
+        self.window.select_recording(row["id"])
         self.store.update(row["id"], status="queued")
         self.window.cancel()
         self.assertEqual(self.store.get(row["id"])["status"], "cancelled")
@@ -100,6 +99,159 @@ class RecordingsUITests(unittest.TestCase):
         self.window.retry()
         self.assertEqual(self.store.get(row["id"])["status"], "queued")
         self.assertFalse((self.store.directory(row["id"]) / "cancel.request").exists())
+
+    def test_menu_opens_and_export_commands_are_dispatched(self):
+        self.window.root.deiconify()
+        self.window.root.update()
+        with patch.object(self.window, "export_text") as export_text, patch.object(self.window, "export_audio") as export_audio:
+            self.window.open_menu("export")
+            self.window.root.update()
+            self.assertTrue(self.window._menu.winfo_ismapped())
+            self.window._menu_buttons[0].invoke()
+            self.assertIsNone(self.window._menu)
+            self.window.open_menu("export")
+            self.window._menu_buttons[1].invoke()
+            export_text.assert_called_once()
+            export_audio.assert_called_once()
+
+    def test_context_actions_follow_processing_state(self):
+        row = self.window.row()
+        actions = lambda: {label: enabled for label, _, enabled in self.window.menu_actions("more")}
+        self.assertTrue(actions()["Excluir gravação"])
+        self.assertFalse(actions()["Cancelar processamento"])
+        self.store.update(row["id"], status="transcribing")
+        self.assertFalse(actions()["Excluir gravação"])
+        self.assertFalse(actions()["Processar novamente"])
+        self.assertTrue(actions()["Cancelar processamento"])
+        self.store.update(row["id"], status="recording")
+        self.assertFalse(actions()["Cancelar processamento"])
+
+    def test_popover_keyboard_skips_disabled_actions_and_has_no_stale_timers(self):
+        self.window.root.deiconify()
+        row = self.window.row()
+        self.store.update(row["id"], status="transcribing", result_path=None)
+        (self.store.directory(row["id"]) / "result.json").unlink()
+        self.window.refresh_list()
+        self.window.refresh_detail()
+        errors = []
+        self.window.root.tk.createcommand("bgerror", errors.append)
+        def pump():
+            self.window.root.after(150, self.window.root.quit)
+            self.window.root.mainloop()
+        self.window.open_menu("more")
+        pump()
+        buttons = self.window._menu_buttons
+        self.assertEqual(self.window.root.focus_get(), buttons[2]._canvas)
+        buttons[2]._canvas.event_generate("<Tab>")
+        pump()
+        self.assertEqual(self.window.root.focus_get(), buttons[4]._canvas)
+        self.window._menu.event_generate("<Escape>")
+        pump()
+        self.assertIsNone(self.window._menu)
+        self.assertEqual(self.window.root.focus_get(), self.window.more_button._canvas)
+        with patch.object(self.window, "export_audio") as export_audio:
+            self.window.open_menu("export")
+            button = self.window._menu_buttons[1]
+            button._on_enter()
+            button._on_release()
+            pump()
+            export_audio.assert_called_once()
+        for _ in range(3):
+            self.window.open_menu("more")
+            self.window.close_menu()
+        pump()
+        self.assertEqual(errors, [])
+        self.assertEqual(len(self.window._menus), 2)
+
+    def test_long_title_preserves_document_and_action_access_at_minimum_size(self):
+        self.window.root.deiconify()
+        self.window.root.geometry("850x590")
+        row = self.window.row()
+        title = "Planejamento e acompanhamento detalhado da equipe " * 6
+        self.store.update(row["id"], title=title)
+        self.window.refresh_list()
+        self.window.refresh_detail()
+        self.window.root.update()
+        self.assertLessEqual(len(self.window.title.cget("text").splitlines()), 2)
+        self.assertTrue(self.window.title.cget("text").endswith("…"))
+        self.assertEqual(self.window.row()["title"], title)
+        self.assertTrue(self.window.document.winfo_ismapped())
+        self.assertGreater(self.window.document.winfo_height(), 130)
+        self.assertTrue(self.window.more_button.winfo_ismapped())
+
+    def test_minimum_window_keeps_transcript_readable_with_capture_warning_and_search(self):
+        self.window.root.deiconify()
+        self.window.root.geometry("850x590")
+        row = self.window.row()
+        self.store.update(row["id"], title="Reunião de planejamento detalhado e acompanhamento das atividades da equipe " * 4,
+                          error="Aviso sobre processamento e recuperação da transcrição. " * 4)
+        with patch("whisper_dictation.recordings_window.read_runtime", return_value={"active": True, "paused": True, "duration": 123}):
+            self.window.refresh()
+            self.window.toggle_find(True)
+            self.window.root.update()
+        self.assertTrue(self.window.capture_bar.winfo_ismapped())
+        self.assertTrue(self.window.notice.winfo_ismapped())
+        self.assertTrue(self.window.find_row.winfo_ismapped())
+        self.assertGreaterEqual(self.window.document.winfo_height(), 90)
+
+    def test_empty_transcript_does_not_replace_clipboard(self):
+        row = self.window.row()
+        result = self.store.directory(row["id"]) / "result.json"
+        result.write_text('{"segments": [], "text": ""}', encoding="utf-8")
+        self.window.refresh_detail()
+        self.assertIn("Nenhuma fala", self.window.text.get("1.0", "end"))
+        self.assertEqual(self.window.copy_button.cget("state"), "disabled")
+        with patch.object(self.window.root, "clipboard_clear") as clear:
+            self.window.copy()
+            clear.assert_not_called()
+
+    def test_refresh_preserves_card_keyboard_focus(self):
+        self.window.root.deiconify()
+        self.window.root.update()
+        selected = self.window.selected
+        self.window.list_rows[selected]._canvas.focus_force()
+        self.window.root.update()
+        other = next(row for row in self.rows if row["id"] != selected)
+        self.store.update(other["id"], duration=10)
+        self.window.refresh_list()
+        self.window.root.update()
+        self.assertEqual(self.window.root.focus_get(), self.window.list_rows[selected]._canvas)
+        self.window.list_rows[selected]._canvas.event_generate("<Down>")
+        self.window.root.update()
+        self.assertIn(self.window.selected, self.window.list_rows)
+        self.assertNotEqual(self.window.selected, selected)
+
+    def test_keyboard_navigation_search_and_rename_preserve_selection(self):
+        self.window.select_recording(self.rows[0]["id"])
+        self.window.move_selection(-1)
+        first = list(self.window.list_rows)[0]
+        self.assertEqual(self.window.selected, first)
+        self.window.move_selection(1)
+        self.assertNotEqual(self.window.selected, first)
+        selected = self.window.selected
+        with patch("whisper_dictation.recordings_window.simpledialog.askstring", return_value="Título revisado"):
+            self.window.rename()
+        self.assertEqual(self.window.selected, selected)
+        self.assertEqual(self.window.title.cget("text"), "Título revisado")
+        self.window.toggle_find(True)
+        self.window.find_entry.insert(0, "Reunião")
+        self.window.find()
+        self.assertTrue(self.window.text.tag_ranges("found"))
+        self.window.toggle_find(False)
+        self.assertFalse(self.window.text.tag_ranges("found"))
+
+    def test_pause_only_appears_during_capture_and_playback_is_blocked(self):
+        self.window.root.deiconify()
+        for state in ({}, {"active": True, "duration": 22}, {"active": True, "paused": True, "duration": 22}, {"finalizing": True}):
+            with patch("whisper_dictation.recordings_window.read_runtime", return_value=state):
+                self.window.refresh()
+                self.window.root.update()
+            self.assertEqual(bool(self.window.capture_bar.winfo_ismapped()), bool(state))
+            if state.get("active"):
+                self.assertEqual(self.window.play_button.cget("state"), "disabled")
+                self.assertEqual(self.window.pause_button.cget("text"), "Retomar" if state.get("paused") else "Pausar")
+            if state.get("finalizing"):
+                self.assertEqual(self.window.record_button.cget("state"), "disabled")
 
     def test_import_with_spaces_keeps_original_and_enqueues_in_same_library(self):
         source = self.directory / "Meu vídeo com espaços.mp4"

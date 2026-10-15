@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import tempfile
 import tkinter as tk
@@ -27,8 +28,13 @@ def screenshot(root, destination):
     root.update_idletasks()
     root.lift()
     root.update()
-    x, y = root.winfo_rootx(), root.winfo_rooty()
-    ImageGrab.grab(bbox=(x, y, x + root.winfo_width(), y + root.winfo_height())).save(destination)
+    if os.name == "nt":
+        import ctypes
+        hwnd = ctypes.windll.user32.GetParent(root.winfo_id()) or root.winfo_id()
+        ImageGrab.grab(window=hwnd).save(destination)
+    else:
+        x, y = root.winfo_rootx(), root.winfo_rooty()
+        ImageGrab.grab(bbox=(x, y, x + root.winfo_width(), y + root.winfo_height())).save(destination)
 
 
 def main():
@@ -36,6 +42,9 @@ def main():
     parser.add_argument("destination", type=Path)
     parser.add_argument("--settings", action="store_true")
     parser.add_argument("--scroll", type=float, default=0)
+    parser.add_argument("--state", choices=("ready", "empty", "recording", "paused", "failed", "processing"), default="ready")
+    parser.add_argument("--scale", type=float, default=1)
+    parser.add_argument("--small", action="store_true")
     args = parser.parse_args()
     args.destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="pace-ui-preview-") as temporary:
@@ -62,8 +71,11 @@ def main():
                  patch.object(root, "mainloop", side_effect=lambda: tk.Tk.mainloop(root)):
                 _run_window(config, lambda _: False, SettingsContext())
         else:
+            ctk.set_widget_scaling(args.scale)
+            ctk.set_window_scaling(args.scale)
             store = RecordingStore(directory / "library")
-            for title, status in (("Planejamento da equipe", "ready"), ("Entrevista — áudio importado", "failed"), ("Alinhamento semanal", "ready")):
+            samples = [] if args.state == "empty" else [("Planejamento da equipe", "ready"), ("Entrevista — áudio importado", "failed"), ("Alinhamento semanal", "ready")]
+            for title, status in samples:
                 row = store.create(title, "import" if status == "failed" else "meeting")
                 folder = store.directory(row["id"])
                 with PCM16WaveWriter(folder / "audio.wav") as writer:
@@ -77,8 +89,20 @@ def main():
                              audio_path=str(folder / "audio.wav"), result_path=str(folder / "result.json"),
                              error="Modelos ainda não preparados. O áudio foi preservado." if status == "failed" else "",
                              speaker_names={"SPEAKER_00": "Maria", "SPEAKER_01": "João"})
-            with patch("whisper_dictation.recordings_window.AppConfig.load", return_value=config):
+            if samples and args.state in {"failed", "processing"}:
+                (folder / "result.json").unlink()
+                store.update(row["id"], status="failed" if args.state == "failed" else "transcribing", progress=.42,
+                             error="Não foi possível concluir a transcrição. Abra os detalhes para saber mais." if args.state == "failed" else "")
+            # Keep the synthetic audio duration consistent with the library.
+            if samples:
+                with PCM16WaveWriter(folder / "audio.wav") as writer:
+                    writer.writeframesraw(np.zeros(16000 * 1842, dtype="<i2").tobytes())
+            runtime = {"active": args.state in {"recording", "paused"}, "paused": args.state == "paused", "duration": 128}
+            with patch("whisper_dictation.recordings_window.AppConfig.load", return_value=config), \
+                 patch("whisper_dictation.recordings_window.read_runtime", return_value=runtime):
                 window = RecordingsWindow(directory)
+                if args.small:
+                    window.root.geometry("850x590")
                 window.root.after(1200, lambda: (screenshot(window.root, args.destination), window.close()))
                 window.root.mainloop()
     print(args.destination.resolve())
