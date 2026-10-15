@@ -50,3 +50,18 @@ Nenhuma promessa de reparo heurístico desses casos; o raw evita a perda futura.
 Escopo de distribuição: atualizar a prévia portátil local; não publicar. O
 instalador precisa ser regenerado antes da publicação, como registrado na
 validação da feature.
+
+## Prévia recompilada
+
+- Fonte da correção: `1ae316e2edc3efe29bbe77e54625b1712c078abd`.
+- PyInstaller concluído em 506,56 s. SHA-256 de `dist/Pace/Pace.exe` e da cópia
+  portátil: `147B0F1BD9B818E48BB7224D57960548ED57968FD731A7912F6F69A39852D389`.
+- Comparação direta dos code objects de `meeting_processing`,
+  `recordings_window` e `ui_utils` arquivados com as fontes: todos idênticos.
+- Prévia aberta em 2026-10-15 10:15:40 (America/Fortaleza); IPC 1.5.0 e janela
+  de biblioteca confirmados. Executável anterior preservado em
+  `%LOCALAPPDATA%/PACE-Preview-1.5.0/temp/word-order-backup/Pace.exe`.
+- A retomada da reunião recuperada também passou no executável novo: exit 0,
+  status `ready`, áudio intacto e mtime do raw inalterado, confirmando reutilização
+  da resposta salva em vez de uma nova chamada ASR. Nenhuma fala exposta no log
+  do ensaio `temp/verify_frozen_word_order_replay.py`.

@@ -56,3 +56,7 @@ revisão. Não encerrar entrega com falhas relevantes abertas.
   biblioteca lateral, transcrição tipográfica, player e menus contextuais. Revisão
   independente e 16 ensaios de UI aprovados; validação e decisões nos documentos
   `validation.md` e `design-refinement.md`. Regerar instalador antes da publicação.
+- T7: corrigida ordenação/projeção de palavras, preservando respostas originais
+  para retomada. 127 testes (um smoke opcional não habilitado), revisão independente,
+  recuperação real com áudio intacto e replay no executável novo aprovados.
+  Prévia local atualizada; detalhes em `transcript-ordering-fix.md`.
