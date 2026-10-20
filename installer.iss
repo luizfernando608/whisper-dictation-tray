@@ -37,13 +37,13 @@ Type: files; Name: "{userstartup}\Whisper Dictation.lnk"
 Source: "dist\Pace\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\PACE"; Filename: "{app}\Pace.exe"
+Name: "{group}\PACE"; Filename: "{app}\Pace.exe"; Parameters: "--recordings"
 Name: "{group}\PACE — Configurações"; Filename: "{app}\Pace.exe"; Parameters: "--settings"
 Name: "{group}\PACE — Gravações"; Filename: "{app}\Pace.exe"; Parameters: "--recordings"
-Name: "{userdesktop}\PACE"; Filename: "{app}\Pace.exe"
+Name: "{userdesktop}\PACE"; Filename: "{app}\Pace.exe"; Parameters: "--recordings"
 Name: "{userdesktop}\PACE — Configurações"; Filename: "{app}\Pace.exe"; Parameters: "--settings"
 Name: "{userdesktop}\PACE — Gravações"; Filename: "{app}\Pace.exe"; Parameters: "--recordings"
 Name: "{userstartup}\PACE"; Filename: "{app}\Pace.exe"
 
 [Run]
-Filename: "{app}\Pace.exe"; Description: "Launch PACE"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\Pace.exe"; Parameters: "--recordings"; Description: "Launch PACE"; Flags: nowait postinstall skipifsilent
