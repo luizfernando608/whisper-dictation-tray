@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import math
 import os
+import queue
 import shutil
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -13,10 +15,11 @@ from tkinter import filedialog, messagebox, simpledialog
 import customtkinter as ctk
 
 from whisper_dictation.playback import WavePlayer, timestamp, transcript_text, speaker_label
+from whisper_dictation._version import __version__
 from whisper_dictation.recording_store import RecordingStore
-from whisper_dictation.settings import AppConfig, config_path, recordings_dir
+from whisper_dictation.settings import AppConfig, config_path, recordings_dir, load_env_file
 from whisper_dictation.settings_window import COLOR_BG_ROOT, COLOR_TEXT_MAIN, _find_asset
-from whisper_dictation.single_instance import MEETING_PAUSE, MEETING_TOGGLE, OPEN_SETTINGS, CAPABILITIES, IMPORT_MEDIA, request, send_command
+from whisper_dictation.single_instance import MEETING_PAUSE, MEETING_TOGGLE, CAPABILITIES, IMPORT_MEDIA, request, send_command
 from whisper_dictation.ui_utils import close_window, fit_window, window_work_area
 
 STATUS = {"new": "Preparando gravação", "starting": "Iniciando gravação", "queued": "Na fila", "recording": "Gravando", "paused": "Pausada", "finalizing": "Salvando áudio",
@@ -48,7 +51,9 @@ def read_runtime(root: Path) -> dict:
 
 
 class RecordingsWindow:
-    def __init__(self, project_root: Path):
+    def __init__(self, project_root: Path, initial_page="recordings", *, follow_navigation=False):
+        if initial_page not in {"recordings", "settings"}:
+            raise ValueError("Página do PACE inválida.")
         self.project_root = project_root
         self.config = AppConfig.load(config_path(project_root))
         self.store_root = recordings_dir(self.config)
@@ -59,6 +64,11 @@ class RecordingsWindow:
         self._signature = None
         self._detail_signature = None
         self._closing = False
+        self.current_page = "recordings"
+        self._settings_frame = None
+        self._last_navigation_id = None
+        self._navigation_queue = queue.SimpleQueue()
+        self._navigation_stop = threading.Event()
         self._menu = None
         self._menus = {}
         self._title_value = ""
@@ -76,6 +86,8 @@ class RecordingsWindow:
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self._build()
         fit_window(self.root)
+        if initial_page == "settings":
+            self.show_settings()
         try:
             from tkinterdnd2 import DND_FILES, TkinterDnD
             TkinterDnD.require(self.root)
@@ -85,6 +97,9 @@ class RecordingsWindow:
         except Exception as exc:
             self.set_notice("Arrastar arquivos indisponível. Use o botão Importar.")
         self.root.after(100, self.refresh)
+        if follow_navigation:
+            threading.Thread(target=self._watch_navigation, name="WindowNavigation", daemon=True).start()
+            self.root.after(100, self._drain_navigation)
 
     def _build(self):
         self.root.grid_columnconfigure(1, weight=1)
@@ -97,11 +112,12 @@ class RecordingsWindow:
         brand = ctk.CTkFrame(sidebar, fg_color="transparent")
         brand.grid(row=0, column=0, sticky="ew", padx=24, pady=(28, 26))
         ctk.CTkLabel(brand, text="PACE", font=ctk.CTkFont(size=23, weight="bold"), text_color=COLOR_TEXT_MAIN).pack(side="left")
-        ctk.CTkLabel(brand, text="/  BIBLIOTECA", font=ctk.CTkFont(size=10, weight="bold"), text_color=MUTED).pack(side="left", padx=(12, 0), pady=(5, 0))
+        self.section_label = ctk.CTkLabel(brand, text="/  BIBLIOTECA", font=ctk.CTkFont(size=10, weight="bold"), text_color=MUTED)
+        self.section_label.pack(side="left", padx=(12, 0), pady=(5, 0))
         self.search = ctk.CTkEntry(sidebar, placeholder_text="Buscar gravação", height=36, corner_radius=8,
                                  fg_color=SURFACE, border_width=1, border_color=LINE, font=ctk.CTkFont(size=13))
         self.search.grid(row=1, column=0, sticky="ew", padx=20)
-        self.search.bind("<KeyRelease>", lambda _: self.refresh_list())
+        self.search.bind("<KeyRelease>", lambda _: self.search_library())
         self.search.bind("<Down>", lambda _: self.move_selection(1))
         self.count = ctk.CTkLabel(sidebar, text="GRAVAÇÕES", anchor="w", text_color=MUTED, font=ctk.CTkFont(size=10, weight="bold"))
         self.count.grid(row=2, column=0, sticky="ew", padx=24, pady=(26, 12))
@@ -115,7 +131,10 @@ class RecordingsWindow:
         footer = ctk.CTkFrame(sidebar, fg_color="transparent")
         footer.grid(row=4, column=0, sticky="ew", padx=20, pady=(16, 20))
         ctk.CTkLabel(footer, text="Arraste áudio ou vídeo\npara importar", anchor="w", justify="left", text_color="#758097", font=ctk.CTkFont(size=11)).pack(anchor="w", padx=4, pady=(0, 12))
-        self.button(footer, "Configurações", lambda: send_command(OPEN_SETTINGS), width=150, anchor="w").pack(anchor="w")
+        self.library_nav = self.button(footer, "Gravações", self.show_library, width=240, anchor="w", fg_color=HOVER)
+        self.library_nav.pack(fill="x", pady=(0, 4))
+        self.settings_nav = self.button(footer, "Configurações", self.show_settings, width=240, anchor="w")
+        self.settings_nav.pack(fill="x")
 
         self.main = ctk.CTkFrame(self.root, corner_radius=0, fg_color=SURFACE)
         self.main.grid(row=0, column=1, sticky="nsew")
@@ -194,7 +213,7 @@ class RecordingsWindow:
         self.text.bind("<ButtonPress-1>", self.transcript_press, add="+")
         self.text.bind("<ButtonRelease-1>", self.transcript_release, add="+")
         self.main.bind("<Configure>", self.resize_detail)
-        self.root.bind("<Control-f>", lambda _: self.toggle_find(True))
+        self.root.bind("<KeyPress>", self._library_key_press, add="+")
 
     def button(self, parent, text, command, primary=False, **kwargs):
         options = dict(height=34, corner_radius=7, border_width=0, font=ctk.CTkFont(size=12),
@@ -441,11 +460,11 @@ class RecordingsWindow:
             status.pack(fill="x", padx=12, pady=(0, 10))
             for widget in (frame, title_widget, subtitle, status):
                 widget.configure(cursor="hand2")
-                widget.bind("<Button-1>", lambda _, rid=row["id"]: self.select_recording(rid))
+                widget.bind("<Button-1>", lambda _, rid=row["id"]: self.open_recording(rid))
             # The underlying canvas participates in native Tab navigation.
             frame._canvas.configure(takefocus=True, highlightthickness=0)
-            frame._canvas.bind("<Return>", lambda _, rid=row["id"]: self.select_recording(rid))
-            frame._canvas.bind("<space>", lambda _, rid=row["id"]: self.select_recording(rid))
+            frame._canvas.bind("<Return>", lambda _, rid=row["id"]: self.open_recording(rid))
+            frame._canvas.bind("<space>", lambda _, rid=row["id"]: self.open_recording(rid))
             frame._canvas.bind("<FocusIn>", lambda _, rid=row["id"]: self.select_recording(rid))
             frame._canvas.bind("<Down>", lambda _: self.move_selection(1))
             frame._canvas.bind("<Up>", lambda _: self.move_selection(-1))
@@ -476,6 +495,7 @@ class RecordingsWindow:
                                          button_hover_color=HOVER if overflow else COLOR_BG_ROOT)
 
     def move_selection(self, direction):
+        self.show_library()
         ids = list(self.list_rows)
         if ids:
             index = ids.index(self.selected) if self.selected in ids else -1
@@ -648,6 +668,118 @@ class RecordingsWindow:
                 self.text.tag_add("playing", *self.text.tag_ranges(tag))
             self._active_segments = active
 
+    def _library_key_press(self, event):
+        if self.current_page == "recordings" and event.state & 4 and event.keysym.lower() == "f":
+            self.toggle_find(True)
+            return "break"
+
+    def open_recording(self, recording_id):
+        self.show_library()
+        self.select_recording(recording_id)
+        return "break"
+
+    def search_library(self):
+        self.show_library()
+        self.refresh_list()
+
+    def show_library(self):
+        if self._settings_frame is not None:
+            self._settings_frame.set_active(False)
+            self._settings_frame.grid_remove()
+        self.main.grid(row=0, column=1, sticky="nsew")
+        self.current_page = "recordings"
+        self.root.title("PACE — Gravações")
+        self.section_label.configure(text="/  BIBLIOTECA")
+        self.library_nav.configure(fg_color=HOVER)
+        self.settings_nav.configure(fg_color="transparent")
+
+    def show_settings(self):
+        self.close_menu()
+        if self._settings_frame is None:
+            from whisper_dictation.settings_ui import create_settings_context
+            from whisper_dictation.settings_window import build_settings_frame
+            config = AppConfig.load(config_path(self.project_root))
+            on_save, context = create_settings_context(self.project_root, config)
+            self._settings_frame = build_settings_frame(
+                self.root, config, on_save, context, on_close=self._settings_closed,
+            )
+        self.main.grid_remove()
+        self._settings_frame.grid(row=0, column=1, sticky="nsew")
+        self._settings_frame.set_active(True)
+        self.current_page = "settings"
+        self.root.title("PACE — Configurações")
+        self.section_label.configure(text="/  CONFIGURAÇÕES")
+        self.library_nav.configure(fg_color="transparent")
+        self.settings_nav.configure(fg_color=HOVER)
+
+    def _settings_closed(self, saved):
+        frame = self._settings_frame
+        if frame is None or not frame.can_close():
+            return
+        frame.destroy()
+        self._settings_frame = None
+        self.show_library()
+        if saved is not None:
+            self.refresh_library_location()
+            self.refresh_list()
+            self.set_notice("Configurações salvas.")
+
+    def _watch_navigation(self):
+        # Socket I/O stays off the Tk thread; only the main thread owns widgets.
+        seen = None
+        while not self._navigation_stop.is_set():
+            try:
+                state = request(CAPABILITIES, timeout=1)
+                navigation_id = state.get("ui_navigation", {}).get("id")
+                if navigation_id and navigation_id != seen:
+                    if self._navigation_stop.is_set():
+                        return
+                    self._navigation_queue.put(state)
+                    seen = navigation_id
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
+            self._navigation_stop.wait(.3)
+
+    def _drain_navigation(self):
+        if self._closing:
+            return
+        latest = None
+        while True:
+            try:
+                latest = self._navigation_queue.get_nowait()
+            except queue.Empty:
+                break
+        if latest is not None:
+            try:
+                self.apply_navigation(latest)
+            except Exception as exc:
+                self.set_notice(f"Não foi possível abrir a página: {exc}")
+        if not self._closing:
+            self.root.after(100, self._drain_navigation)
+
+    def apply_navigation(self, state):
+        if self._closing or state.get("version") != __version__:
+            return
+        try:
+            if Path(state.get("project_root", "")).resolve() != self.project_root.resolve():
+                return
+            navigation = state.get("ui_navigation", {})
+            token, page = navigation.get("id"), navigation.get("page")
+        except (OSError, ValueError, TypeError, AttributeError):
+            return
+        if not isinstance(token, str) or not token or len(token) > 128 or token == self._last_navigation_id:
+            return
+        if page not in {"recordings", "settings", "close"}:
+            return
+        self._last_navigation_id = token
+        if page == "close":
+            self.close()
+            return
+        self.show_settings() if page == "settings" else self.show_library()
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
     def refresh(self):
         if self._closing:
             return
@@ -818,13 +950,17 @@ class RecordingsWindow:
             messagebox.showerror("Excluir", str(exc), parent=self.root)
 
     def close(self):
+        if self._settings_frame is not None and not self._settings_frame.can_close():
+            return
         self._closing = True
+        self._navigation_stop.set()
         self.player.close()
         close_window(self.root)
 
 
-def run_recordings_window(project_root: Path):
-    RecordingsWindow(project_root).root.mainloop()
+def run_recordings_window(project_root: Path, initial_page="recordings"):
+    load_env_file(project_root)
+    RecordingsWindow(project_root, initial_page, follow_navigation=True).root.mainloop()
 
 
 def run_meeting_overlay(project_root: Path):

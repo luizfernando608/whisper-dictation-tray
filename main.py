@@ -36,6 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--recordings", action="store_true", help="Abre a biblioteca de gravações.")
     parser.add_argument("--recordings-ui", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--ui-page", choices=("recordings", "settings"), default="recordings", help=argparse.SUPPRESS)
     parser.add_argument("--meeting-overlay", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--process-recording", help=argparse.SUPPRESS)
     parser.add_argument("--store-root", type=Path, help=argparse.SUPPRESS)
@@ -130,7 +131,7 @@ def main() -> int:
 
     if args.recordings_ui:
         from whisper_dictation.recordings_window import run_recordings_window
-        run_recordings_window(PROJECT_ROOT)
+        run_recordings_window(PROJECT_ROOT, initial_page=args.ui_page)
         return 0
     if args.meeting_overlay:
         from whisper_dictation.recordings_window import run_meeting_overlay

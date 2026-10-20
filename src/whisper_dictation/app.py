@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import subprocess
-import sys
 import threading
 import time
+import uuid
 from enum import StrEnum
 from pathlib import Path
 
@@ -51,8 +51,9 @@ class DictationApp:
         self._instance = instance
         self._open_settings_on_start = open_settings_on_start
         self._update_available: updater.UpdateInfo | None = None
-        self._settings_proc: subprocess.Popen | None = None
         self._recordings_proc: subprocess.Popen | None = None
+        self._ui_lock = threading.Lock()
+        self._ui_navigation = {"id": "", "page": "recordings"}
         self._meeting_overlay_proc: subprocess.Popen | None = None
         self._update_ready = False
         self._update_lock = threading.Lock()
@@ -101,7 +102,7 @@ class DictationApp:
             self._instance.register(MEETING_TOGGLE, self.toggle_meeting)
             self._instance.register(MEETING_PAUSE, self.pause_meeting)
             self._instance.register(APPLY_UPDATE, self._request_restart_update)
-            self._instance.register(CAPABILITIES, lambda: {"save_settings": True, "meetings": True, "import_media": True, "project_root": str(self.project_root), "version": __version__})
+            self._instance.register(CAPABILITIES, self._capabilities)
             self._instance.register_request(IMPORT_MEDIA, self._import_media_request)
             self._instance.register_request(SAVE_SETTINGS, self._commit_settings_request)
 
@@ -411,9 +412,30 @@ class DictationApp:
             except Exception:
                 self.logger.debug("Tray meeting update failed", exc_info=True)
 
+    def _capabilities(self):
+        with self._ui_lock:
+            navigation = dict(self._ui_navigation)
+        return {"save_settings": True, "meetings": True, "import_media": True,
+                "project_root": str(self.project_root), "version": __version__,
+                "ui_navigation": navigation}
+
     def _open_recordings_now(self):
-        if self._recordings_proc is None or self._recordings_proc.poll() is not None:
-            self._recordings_proc = subprocess.Popen(runtime_command(self.project_root, "--recordings-ui"), creationflags=0x08000000)
+        self._open_main_window("recordings")
+
+    def _open_main_window(self, page):
+        try:
+            with self._ui_lock:
+                if self._restarting or self._shutdown.is_set():
+                    return
+                self._ui_navigation = {"id": uuid.uuid4().hex, "page": page}
+                if self._recordings_proc is None or self._recordings_proc.poll() is not None:
+                    self._recordings_proc = subprocess.Popen(
+                        runtime_command(self.project_root, "--recordings-ui", "--ui-page", page),
+                        creationflags=0x08000000,
+                    )
+        except Exception:
+            self.logger.exception("Não foi possível abrir a janela do PACE.")
+            self._notify("PACE", "Não foi possível abrir a janela. Tente novamente pelo menu da bandeja.")
 
     def _meeting_label(self, *_):
         if getattr(self, "meetings", None) and self.meetings._finalizing:
@@ -431,27 +453,7 @@ class DictationApp:
         self._open_settings_now()
 
     def _open_settings_now(self) -> None:
-        # Run the settings UI in its own process so CustomTkinter owns a clean
-        # main thread — its dropdown popups deadlock off the main thread.
-        proc = self._settings_proc
-        if proc is not None and proc.poll() is None:
-            return  # already open
-        try:
-            self._settings_proc = subprocess.Popen(
-                self._settings_ui_command(),
-                creationflags=0x08000000,  # CREATE_NO_WINDOW
-            )
-        except Exception as exc:
-            self._set_error(f"Falha ao abrir as configurações: {exc}")
-
-    def _settings_ui_command(self) -> list[str]:
-        if getattr(sys, "frozen", False):
-            return [sys.executable, "--settings-ui"]
-        venv_py = self.project_root / ".venv" / "Scripts" / "pythonw.exe"
-        if not venv_py.exists():
-            venv_py = self.project_root / ".venv" / "Scripts" / "python.exe"
-        py = str(venv_py) if venv_py.exists() else sys.executable
-        return [py, str(self.project_root / "main.py"), "--settings-ui"]
+        self._open_main_window("settings")
 
     def _reload_config_from_disk(self) -> None:
         if not self._can_change_config("aplicar as configurações"):
@@ -519,10 +521,18 @@ class DictationApp:
                     self._notify("PACE", "A atualização está pronta. Conclua as gravações e a fila antes de reiniciar.")
                     return
                 self._restarting = True
-            for proc in (self._settings_proc, self._recordings_proc, self._meeting_overlay_proc):
-                if proc is not None and proc.poll() is None:
-                    proc.terminate()
-                    proc.wait(timeout=10)
+            with self._ui_lock:
+                ui_process = self._recordings_proc
+                if ui_process is not None and ui_process.poll() is None:
+                    self._ui_navigation = {"id": uuid.uuid4().hex, "page": "close"}
+            if ui_process is not None and ui_process.poll() is None:
+                try:
+                    ui_process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    raise updater.UpdateError("Conclua o preparo dos modelos ou feche a janela antes de atualizar.") from None
+            if self._meeting_overlay_proc is not None and self._meeting_overlay_proc.poll() is None:
+                self._meeting_overlay_proc.terminate()
+                self._meeting_overlay_proc.wait(timeout=10)
             updater.restart_to_update(update, self.project_root)
             self._shutdown_app()
         except Exception as exc:
@@ -594,8 +604,9 @@ class DictationApp:
     def _build_menu(self) -> Menu:
         return Menu(
             MenuItem(lambda *_: self._status_label(), None, enabled=False),
-            MenuItem(lambda *_: self._toggle_label(), self._menu_toggle, default=True),
+            MenuItem("Abrir PACE", lambda *_: self._open_recordings_now(), default=True),
             Menu.SEPARATOR,
+            MenuItem(lambda *_: self._toggle_label(), self._menu_toggle),
             MenuItem(self._meeting_label, lambda *_: self.toggle_meeting()),
             MenuItem(self._pause_label, lambda *_: self.pause_meeting(), enabled=lambda _: bool(getattr(self, "meetings", None) and self.meetings.active)),
             MenuItem("Gravações...", lambda *_: self._open_recordings_now()),
