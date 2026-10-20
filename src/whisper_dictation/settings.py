@@ -16,8 +16,8 @@ class AppConfig:
     language: str = "auto"
     transcription_provider: str = "groq"
     groq_model: str = "whisper-large-v3"
-    openai_model: str = "gpt-4o-transcribe"
-    gemini_model: str = "gemini-2.5-flash"
+    openai_model: str = "gpt-transcribe"
+    gemini_model: str = "gemini-3.8-flash"
     groq_api_key_env: str = "GROQ_API_KEY"
     groq_timeout_seconds: float = 30.0
     model_size: str = "small"

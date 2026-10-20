@@ -29,7 +29,6 @@ PROVIDERS: dict[str, ProviderInfo] = {
         models=(
             "whisper-large-v3",
             "whisper-large-v3-turbo",
-            "distil-whisper-large-v3-en",
         ),
         default_model="whisper-large-v3",
         key_hint="Crie uma chave em console.groq.com/keys",
@@ -39,11 +38,13 @@ PROVIDERS: dict[str, ProviderInfo] = {
         label="OpenAI  (nuvem)",
         needs_api_key=True,
         models=(
+            "gpt-transcribe",
             "gpt-4o-transcribe",
             "gpt-4o-mini-transcribe",
+            "gpt-4o-transcribe-diarize",
             "whisper-1",
         ),
-        default_model="gpt-4o-transcribe",
+        default_model="gpt-transcribe",
         key_hint="Crie uma chave em platform.openai.com/api-keys",
     ),
     "gemini": ProviderInfo(
@@ -51,12 +52,14 @@ PROVIDERS: dict[str, ProviderInfo] = {
         label="Google Gemini  (nuvem)",
         needs_api_key=True,
         models=(
-            "gemini-2.5-flash",
-            "gemini-3.5-flash",
-            "gemini-3.1-flash",
+            "gemini-3.8-flash",
+            "gemini-3.5-transcribe",
+            "gemini-4-argon",
+            "gemini-3.6-flash",
+            "gemini-3.5-flash-lite",
             "gemini-3.1-flash-lite",
         ),
-        default_model="gemini-2.5-flash",
+        default_model="gemini-3.8-flash",
         key_hint="Crie uma chave em aistudio.google.com/apikey",
     ),
     "local": ProviderInfo(
