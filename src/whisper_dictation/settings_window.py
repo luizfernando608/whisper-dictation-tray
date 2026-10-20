@@ -146,6 +146,72 @@ def run_settings_window(
     _run_window(replace(config), on_save, context or SettingsContext())
 
 
+class SettingsFrame(ctk.CTkFrame):
+    """Settings draft embedded in the main window's existing Tk interpreter."""
+
+    def __init__(self, parent, config, on_save, context, on_close=None):
+        self._disposed = False
+        self._active = True
+        self._after_tokens: set[str] = set()
+        self._cleanup_callbacks: list[Callable[[], None]] = []
+        self._deactivate_callbacks: list[Callable[[], None]] = []
+        self._model_setup = None
+        self._on_close = on_close or (lambda saved: self.destroy())
+        super().__init__(parent, fg_color=COLOR_BG_ROOT, corner_radius=0)
+        _build_settings_contents(self, replace(config), on_save, context)
+
+    def after(self, ms, func=None, *args):
+        if func is None:
+            return super().after(ms)
+        def invoke():
+            self._after_tokens.discard(token)
+            if not self._disposed:
+                func(*args)
+        token = super().after(ms, invoke)
+        self._after_tokens.add(token)
+        return token
+
+    def set_active(self, active: bool) -> None:
+        self._active = active
+        if not active:
+            for callback in self._deactivate_callbacks:
+                callback()
+
+    def can_close(self) -> bool:
+        return not self._model_setup or self._model_setup[0].poll() is not None
+
+    def cancel(self) -> None:
+        if not self.can_close():
+            messagebox.showinfo("Modelos", "Aguarde o preparo dos modelos antes de fechar ou salvar as configurações.", parent=self.winfo_toplevel())
+            return
+        self._on_close(None)
+
+    def destroy(self) -> None:
+        if self._disposed:
+            return
+        self._disposed = True
+        for token in tuple(self._after_tokens):
+            self.after_cancel(token)
+        self._after_tokens.clear()
+        for callback in self._cleanup_callbacks:
+            callback()
+        if self._model_setup:
+            self._model_setup[1].close()
+            self._model_setup = None
+        super().destroy()
+
+
+def build_settings_frame(
+    parent,
+    config: AppConfig,
+    on_save: SaveCallback,
+    context: SettingsContext | None = None,
+    *,
+    on_close: Callable[[AppConfig | None], None] | None = None,
+) -> SettingsFrame:
+    return SettingsFrame(parent, config, on_save, context or SettingsContext(), on_close)
+
+
 def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsContext) -> None:
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("dark-blue")
@@ -190,6 +256,17 @@ def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsConte
     except Exception:
         pass
 
+    from whisper_dictation.ui_utils import close_window, fit_window
+    frame = build_settings_frame(root, config, on_save, context, on_close=lambda saved: close_window(root))
+    frame.pack(fill="both", expand=True)
+    root.protocol("WM_DELETE_WINDOW", frame.cancel)
+    fit_window(root, preferred=(680, 580), minimum=(640, 520))
+    root.after(60, root.lift)
+    root.after(80, root.focus_force)
+    root.mainloop()
+
+
+def _build_settings_contents(root: SettingsFrame, config: AppConfig, on_save: SaveCallback, context: SettingsContext) -> None:
     heading_font = ctk.CTkFont(size=16, weight="bold")
     hint_font = ctk.CTkFont(size=11)
     muted = COLOR_TEXT_MUTED
@@ -220,9 +297,9 @@ def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsConte
     limit_by_label = {label: value for label, value in limit_options}
     limit_labels = [label for label, _ in limit_options]
 
-    hotkey_var = tk.StringVar(value=config.hotkey)
-    key_var = tk.StringVar()
-    show_key_var = tk.BooleanVar(value=False)
+    hotkey_var = tk.StringVar(master=root, value=config.hotkey)
+    key_var = tk.StringVar(master=root)
+    show_key_var = tk.BooleanVar(master=root, value=False)
 
     # Reusable control style dictionary
     menu_style = {
@@ -434,11 +511,13 @@ def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsConte
     capture_btn.pack(side="left", padx=(8, 0))
     hotkey_status = ctk.CTkLabel(tab_hotkey, text="Ex.: Ctrl+Shift+H", text_color=muted, font=hint_font)
     hotkey_status.pack(anchor="w", padx=4, pady=(8, 0))
-    _wire_hotkey_capture(tab_hotkey, capture_btn, hotkey_var, hotkey_status)
+    deactivate, cleanup = _wire_hotkey_capture(tab_hotkey, capture_btn, hotkey_var, hotkey_status, owner=root)
+    root._deactivate_callbacks.append(deactivate)
+    root._cleanup_callbacks.append(cleanup)
     collect_meeting = _build_meeting_tab(tab_meeting, config, menu_style, root)
 
     # ============================== SOBRE =============================
-    _build_about_tab(tab_about, context, heading_font, muted)
+    _build_about_tab(tab_about, context, heading_font, muted, owner=root)
 
     # ============================== RODAPÉ ============================
     footer = ctk.CTkFrame(root, fg_color="transparent")
@@ -448,8 +527,7 @@ def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsConte
         if context.can_save and not context.can_save():
             messagebox.showerror("Configurações", "Conclua a reunião e a fila antes de salvar alterações.")
             return
-        setup = getattr(root, "_model_setup", None)
-        if setup and setup[0].poll() is None:
+        if not root.can_close():
             messagebox.showinfo("Modelos", "Aguarde o preparo dos modelos antes de fechar ou salvar as configurações.")
             return
         _stash_current()
@@ -500,7 +578,7 @@ def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsConte
                 return
             saved = on_save(new_config)
         if saved:
-            root.destroy()
+            root._on_close(new_config)
         else:
             messagebox.showerror(
                 "Configurações", "Não foi possível salvar agora. Veja os logs do aplicativo."
@@ -510,7 +588,7 @@ def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsConte
         footer,
         text="Cancelar",
         width=110,
-        command=root.destroy,
+        command=root.cancel,
         fg_color="transparent",
         hover_color="#181C28",
         border_color=COLOR_BORDER,
@@ -529,12 +607,6 @@ def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsConte
         font=ctk.CTkFont(size=12, weight="bold"),
         corner_radius=7,
     ).pack(side="right", padx=(0, 8))
-
-    root.update_idletasks()
-    _center(root)
-    root.after(60, root.lift)
-    root.after(80, root.focus_force)
-    root.mainloop()
 
 
 def _build_meeting_tab(tab, config, menu_style, root):
@@ -572,7 +644,7 @@ def _build_meeting_tab(tab, config, menu_style, root):
         widget.set(current)
         widget.pack(fill="x")
         fields[key], mappings[key] = widget, choices
-    overlay = tk.BooleanVar(value=config.meeting_show_overlay)
+    overlay = tk.BooleanVar(master=tab, value=config.meeting_show_overlay)
     ctk.CTkCheckBox(frame, text="Mostrar cápsula discreta durante a reunião", variable=overlay).pack(anchor="w", pady=14)
     ctk.CTkLabel(frame, text="Reuniões são gravadas sem limite de tempo e salvas em disco.\nA saída selecionada inclui todos os sons reproduzidos nela.", justify="left", text_color=COLOR_TEXT_MUTED).pack(fill="x")
     folder = entry("meeting_storage_dir", "Pasta da biblioteca (vazio usa a pasta padrão do PACE)", config.meeting_storage_dir)
@@ -657,7 +729,8 @@ def _build_meeting_tab(tab, config, menu_style, root):
                 return
             updated = AppConfig(**AppConfig._sanitize({**asdict(config), **collect()}))
             if updated.diarization_engine == "community-1" and token.get().strip() != token_original:
-                secrets_store.set_api_key("huggingface", token.get().strip())
+                setup_status.configure(text="Salve o token Hugging Face antes de preparar os modelos.", text_color=COLOR_DANGER)
+                return
             setup_dir = Path(tempfile.mkdtemp(prefix="setup-", dir=data_dir()))
             setup_config = setup_dir / "config.json"
             setup_progress = setup_dir / "progress.json"
@@ -691,6 +764,7 @@ def _build_meeting_tab(tab, config, menu_style, root):
                 root.after(500, poll)
             else:
                 job.close()
+                root._model_setup = None
                 prepare_button.configure(state="normal")
                 if proc.returncode:
                     setup_status.configure(text_color=COLOR_DANGER)
@@ -711,7 +785,7 @@ def _persist_keys(current: dict[str, str], original: dict[str, str]) -> None:
             secrets_store.set_api_key(provider, value)
 
 
-def _build_about_tab(tab, context: SettingsContext, heading_font, muted) -> None:
+def _build_about_tab(tab, context: SettingsContext, heading_font, muted, owner=None) -> None:
     brand_frame = ctk.CTkFrame(tab, fg_color="transparent")
     brand_frame.pack(anchor="w", padx=4, pady=(10, 16), fill="x")
 
@@ -754,7 +828,7 @@ def _build_about_tab(tab, context: SettingsContext, heading_font, muted) -> None
         corner_radius=6,
     )
     update_btn.pack(anchor="w", padx=4, pady=(4, 14))
-    _wire_update_button(tab, update_btn, update_status, context)
+    _wire_update_button(tab, update_btn, update_status, context, owner=owner)
 
     tools = ctk.CTkFrame(tab, fg_color="transparent")
     tools.pack(anchor="w", padx=4, fill="x")
@@ -780,13 +854,18 @@ def _build_about_tab(tab, context: SettingsContext, heading_font, muted) -> None
         ).pack(side="left")
 
 
-def _wire_update_button(parent, button, status, context: SettingsContext) -> None:
+def _wire_update_button(parent, button, status, context: SettingsContext, owner=None) -> None:
     if not context.check_update:
         button.configure(state="disabled")
         status.configure(text="Verificação de atualização indisponível.")
         return
 
+    scheduler = owner if owner is not None else parent
+
     def _apply_update(update: object) -> None:
+        if owner is not None and not owner.can_close():
+            status.configure(text="Aguarde o preparo dos modelos antes de atualizar.")
+            return
         if context.run_update:
             try:
                 context.run_update(update)
@@ -812,7 +891,7 @@ def _wire_update_button(parent, button, status, context: SettingsContext) -> Non
             try:
                 update, error = responses.get_nowait()
             except queue.Empty:
-                parent.after(100, finish)
+                scheduler.after(100, finish)
             else:
                 button.configure(state="normal")
                 if error:
@@ -825,16 +904,18 @@ def _wire_update_button(parent, button, status, context: SettingsContext) -> Non
                     status.configure(text="Você já está na versão mais recente.")
 
         threading.Thread(target=worker, daemon=True).start()
-        parent.after(100, finish)
+        scheduler.after(100, finish)
 
     button.configure(command=do_check)
 
 
-def _wire_hotkey_capture(parent, button, hotkey_var: tk.StringVar, status) -> None:
+def _wire_hotkey_capture(parent, button, hotkey_var: tk.StringVar, status, owner=None):
     held: set[str] = set()
     capturing = {"on": False}
 
     def start_capture() -> None:
+        if owner is not None and not owner._active:
+            return
         held.clear()
         capturing["on"] = True
         button.configure(text="Pressione as teclas…")
@@ -847,7 +928,7 @@ def _wire_hotkey_capture(parent, button, hotkey_var: tk.StringVar, status) -> No
         button.configure(text="Gravar atalho")
 
     def on_press(event: tk.Event) -> str | None:
-        if not capturing["on"]:
+        if not capturing["on"] or (owner is not None and not owner._active):
             return None
         keysym = event.keysym
         if keysym in _MOD_KEYSYMS:
@@ -873,8 +954,12 @@ def _wire_hotkey_capture(parent, button, hotkey_var: tk.StringVar, status) -> No
 
     button.configure(command=start_capture)
     top = parent.winfo_toplevel()
-    top.bind("<KeyPress>", on_press, add="+")
-    top.bind("<KeyRelease>", on_release, add="+")
+    press_binding = top.bind("<KeyPress>", on_press, add="+")
+    release_binding = top.bind("<KeyRelease>", on_release, add="+")
+    def cleanup() -> None:
+        top.unbind("<KeyPress>", press_binding)
+        top.unbind("<KeyRelease>", release_binding)
+    return stop_capture, cleanup
 
 
 def _normalize_keysym(keysym: str, char: str) -> str | None:
