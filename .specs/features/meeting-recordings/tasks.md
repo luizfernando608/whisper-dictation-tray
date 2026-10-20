@@ -60,3 +60,10 @@ revisão. Não encerrar entrega com falhas relevantes abertas.
   para retomada. 127 testes (um smoke opcional não habilitado), revisão independente,
   recuperação real com áudio intacto e replay no executável novo aprovados.
   Prévia local atualizada; detalhes em `transcript-ordering-fix.md`.
+- T8: em 2026-10-20, usuário autorizou instalação/captura reais neste computador.
+  Instalação limpa, upgrade 1.4 → 1.5, rollback após falha de confirmação, captura
+  física de 128,734 s, pipeline local/Groq e quatro runtimes instalados aprovados.
+  Corrigidas exclusões do pacote e recuperação da integração Windows, com revisão
+  independente e 178 testes aprovados/um skip por privilégio. Prévia e atalho
+  Windows validados; instalador final disponível. Isso encerra os gates locais
+  antes pendentes. Evidências em `install-validation-2026-10-20.md`; sem publicação.

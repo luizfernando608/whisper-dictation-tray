@@ -154,3 +154,12 @@ deste documento é anterior a essa revisão e deve ser regenerado antes de publi
   prévia. Configurações e biblioteca preservadas; instalação principal intacta.
 - Somente a prévia portátil foi atualizada. O instalador `Output/Pace_Installer.exe`
   permanece no candidato anterior e precisa ser regerado antes da publicação.
+
+### Validação posterior — 20/10/2026
+
+O pacote foi regenerado e os ensaios reais autorizados de instalação limpa,
+upgrade, rollback e captura física foram concluídos neste computador. A prévia
+atual usa o EXE final validado e abriu pelo atalho real do menu Iniciar.
+O estado atual do candidato, hashes e limites dos ensaios estão em
+`install-validation-2026-10-20.md`; os gates pendentes acima descrevem o estágio
+anterior. Nenhum release externo foi publicado.
