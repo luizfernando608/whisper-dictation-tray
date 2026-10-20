@@ -222,6 +222,9 @@ class EmbeddedSettingsTests(unittest.TestCase):
                         for page in ("Transcrição", "Áudio", "Atalho", "Sobre"):
                             tabview.set(page)
                             self.pump()
+                            # Under load the tab timer and quit timer can run in
+                            # one batch, before Tk applies deferred geometry.
+                            self.root.update_idletasks()
                             for widget in descendants(tabview.tab(page)):
                                 if isinstance(widget, (ctk.CTkEntry, ctk.CTkComboBox, ctk.CTkOptionMenu, ctk.CTkButton)):
                                     assert_visible(widget)
@@ -229,6 +232,7 @@ class EmbeddedSettingsTests(unittest.TestCase):
                             assert_visible(self.button("Cancelar"))
                         tabview.set("Reuniões")
                         self.pump()
+                        self.root.update_idletasks()
                         meeting = next(w for w in descendants(tabview.tab("Reuniões")) if isinstance(w, ctk.CTkScrollableFrame))
                         meeting._parent_canvas.yview_moveto(1)
                         self.root.update()

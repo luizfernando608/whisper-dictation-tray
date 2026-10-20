@@ -128,7 +128,7 @@ def stop_tree(process):
     psutil.wait_procs(remaining, timeout=15)
 
 
-def start(target, environment, legacy=False):
+def start(target, environment, legacy=False, expected_version=None):
     subprocess.Popen([str(target / "Pace.exe"), *([] if legacy else ["--recordings"])],
                      cwd=target, env=environment, **hidden_process_options())
     wait_for(probe, description="tray IPC")
@@ -136,7 +136,8 @@ def start(target, environment, legacy=False):
         return
     state = request(CAPABILITIES, timeout=5)
     assert Path(state["project_root"]).resolve() == target.resolve(), state
-    assert state["version"] == "1.5.0", state
+    if expected_version is not None:
+        assert state["version"] == expected_version, state
     wait_for(lambda: any("Gravações" in title for _, title in windows(target)), description="recordings window")
 
 
@@ -157,6 +158,9 @@ def main():
     parser.add_argument("--preview", required=True, type=Path)
     parser.add_argument("--phase", choices=("install", "rollback"), default="install")
     parser.add_argument("--helper-source", type=Path, help="Previously clean-installed candidate used by the rollback test")
+    parser.add_argument("--version", default="1.5.0", help="Expected candidate version")
+    parser.add_argument("--old-version", default="1.4.0", help="Expected rollback version")
+    parser.add_argument("--single-window", action="store_true", help="Verify settings reuse the library window")
     args = parser.parse_args()
     root, preview = args.output.resolve(), args.preview.resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -230,18 +234,27 @@ def main():
             install(args.installer, clean, root / "clean-install.log")
             assert not any((clean / "_internal" / "onnx" / "backend" / "test").rglob("*.*"))
             assert not any((clean / "_internal" / "torch" / "include").rglob("*.*"))
-            start(clean, environment)
+            start(clean, environment, expected_version=args.version)
             assert json.loads((clean / "config.json").read_text())["max_record_seconds"] == 0
             assert request(CAPABILITIES)["meetings"]
+            library_handles = {hwnd for hwnd, _ in windows(clean)}
             send_command(OPEN_SETTINGS)
-            wait_for(lambda: len(windows(clean)) >= 2, description="settings window")
+            if args.single_window:
+                wait_for(lambda: any("Configurações" in title for _, title in windows(clean)), description="settings page")
+                assert len(library_handles) == 1 and {hwnd for hwnd, _ in windows(clean)} == library_handles
+                record("settings_share_library_window", same_hwnd=True, visible_windows=1)
+                send_command(OPEN_RECORDINGS)
+                wait_for(lambda: any("Gravações" in title for _, title in windows(clean)), description="return to library")
+                assert {hwnd for hwnd, _ in windows(clean)} == library_handles
+            else:
+                wait_for(lambda: len(windows(clean)) >= 2, description="settings window")
             record("clean_install_ui_and_settings", titles=[title for _, title in windows(clean)], default_limit=0)
             stop(clean)
         target = root / ("upgrade" if args.phase == "install" else "rollback")
         targets.append(target)
         assert not target.exists()
         install(args.old_installer, target, root / f"old-{args.phase}-install.log")
-        start(target, environment, legacy=True)
+        start(target, environment, legacy=args.old_version == "1.4.0", expected_version=args.old_version)
         old_hash = digest(target / "Pace.exe")
         old_runtime = runtime_manifest(target)
         old_uninstallers = {path.name: digest(path) for path in target.glob("unins*.*") if path.is_file()}
@@ -258,7 +271,7 @@ def main():
         store.update(row["id"], status="ready", duration=12, speaker_names={"SPEAKER_00": "Validation speaker"})
         preserved = {str(path.relative_to(target)): digest(path) for path in (
             target / "config.json", target / ".env", target / "models" / "keep.txt", store.directory(row["id"]) / "keep.txt")}
-        version = "1.5.0" if args.phase == "install" else "9.9.9"
+        version = args.version if args.phase == "install" else "9.9.9"
         cache = Path(environment["LOCALAPPDATA"]) / "PaceData" / "updates"
         installer = cache / version / "Pace_Installer.exe"
         installer.parent.mkdir(parents=True, exist_ok=True)
@@ -294,7 +307,7 @@ def main():
         assert RecordingStore(target / "recordings").get(row["id"])["speaker_names"] == {"SPEAKER_00": "Validation speaker"}
         if args.phase == "install":
             state = request(CAPABILITIES)
-            assert state["version"] == "1.5.0" and Path(state["project_root"]).resolve() == target
+            assert state["version"] == args.version and Path(state["project_root"]).resolve() == target
             send_command(OPEN_RECORDINGS)
             wait_for(lambda: any("Gravações" in title for _, title in windows(target)), description="upgraded library")
             record("real_upgrade_confirmed", receipt_version=json.loads((staging / "confirmed.json").read_text())["version"],
@@ -308,7 +321,7 @@ def main():
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as key:
                 registered_version = winreg.QueryValueEx(key, "DisplayVersion")[0]
             record("rollback_registration_version", version=registered_version)
-            assert registered_version == "1.4.0", "Rollback left new installer registration over old binaries"
+            assert registered_version == args.old_version, "Rollback left new installer registration over old binaries"
             assert {path.name: digest(path) for path in target.glob("unins*.*") if path.is_file()} == old_uninstallers
             assert {str(path): digest(path) if path.is_file() else None for path in paths} == old_links
             record("rollback_integration_restored", shortcuts=True, uninstallers=True, registry=True)
