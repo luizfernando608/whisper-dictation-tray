@@ -1,0 +1,11 @@
+# Janela principal e provedores — candidato 1.5.1
+
+`app.py:_open_main_window()` serializa pedidos sob `_ui_lock`, mantém um único filho `--recordings-ui` e publica `{id,page}` em `CAPABILITIES.ui_navigation`. `recordings_window.py:_watch_navigation()` faz I/O fora do Tk e enfileira snapshots; `apply_navigation()` valida versão/pasta, ignora IDs consumidos e troca/foca página no thread principal. O handler padrão da bandeja abre a UI. A ação interna `close` permite fechar graciosamente para atualização; modelo em preparo pode recusar, e a bandeja adia em vez de matar o processo.
+
+`SettingsFrame` reutiliza o interpretador Tk de `RecordingsWindow`; `build_settings_frame()` recebe callback de fechamento, nunca destrói o root principal. Navegação oculta o frame mantendo rascunho; salvar/cancelar descartam. `create_settings_context()` mantém commit via IPC e verifica biblioteca comprometida/runtime. Desativação solta captura de atalhos; destruição remove somente bindings/timers próprios. Não usar `<Control-f>` específico no root: ele impede a captura genérica desse atalho nas configurações; biblioteca usa handler genérico condicionado à página.
+
+`providers.py` define sugestões atuais; `settings.py` preserva IDs salvos/personalizados. Novos padrões de ditado: `gpt-transcribe` e `gemini-3.8-flash`. `transcription.py` aplica `languages` no OpenAI atual, Interactions para sugestões Gemini atuais e contrato dedicado para `gemini-3.5-transcribe`; IDs legados/customizados continuam pelo caminho anterior. Gemini não persiste interações (`store=False`), limpa uploads, fecha cliente e rejeita `errors` (plural) ou texto incompleto. Groq mantém cliente reutilizado para não perder conexão a cada ditado.
+
+As reuniões continuam usando o provedor de timestamps configurado em `meeting_processing.py:_effective_provider()` (Groq, whisper-1 ou local); os novos adaptadores de ditado não alteram essa política. Não confundir suporte de entrada de áudio do catálogo com integração de timestamps no pipeline de reuniões.
+
+Fontes oficiais, decisões e resultados em `.specs/features/provider-compatibility-unified-window/`. Usuário escolheu validar sem chaves Gemini/OpenAI; os testes usam SDKs reais com transporte HTTP controlado e não comprovam quota/permissão de conta real.

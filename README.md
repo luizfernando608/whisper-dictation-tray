@@ -66,15 +66,19 @@ installation folder. Its location and the model cache can be changed in settings
 
 ## Settings
 
-Open settings either from the **"PACE — Configurações"** shortcut
-(Start Menu / Desktop) or by right-clicking the tray icon → `Configurações...`.
-The window has tabs:
+The tray icon's primary click opens PACE. Dictation and meeting capture remain
+explicit tray actions and global shortcuts. Library and settings share one main
+window: use **Configurações** in the sidebar, the Start Menu shortcut, or the tray
+menu to open the settings page. Switching pages preserves unsaved settings drafts
+and the selected recording; Save applies changes and returns to the library.
+The settings page has tabs:
 
 - **Transcrição**: pick a provider and its model, and paste the provider's API
   key right there.
   - **Groq** (cloud, very fast)
-  - **OpenAI** (`gpt-4o-transcribe`, `gpt-4o-mini-transcribe`, `whisper-1`)
-  - **Google Gemini** (`gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-2.0-flash`)
+  - **OpenAI** (`gpt-transcribe` by default, plus compatible legacy transcription models)
+  - **Google Gemini** (`gemini-3.8-flash` by default, `gemini-3.5-transcribe`,
+    and other current audio-input Gemini models)
   - **Local** (100% offline via `faster-whisper`, no key needed)
   - Language: automatic detection, Portuguese, or English.
 - **Áudio**: input microphone and recording time limit (unlimited manual stop, or 2 to 120 minutes auto-stop).
@@ -106,5 +110,6 @@ Run `scripts/test.ps1` for automated tests and `build.ps1` for PyInstaller/Inno 
 The build isolates DirectML from the CPU ONNX runtime and checks downloaded wheel
 integrity. Model preparation keeps publisher notices/licenses beside cached weights:
 Nemotron 3 uses OpenMDW-1.1, its native runtime Apache-2.0, and Community-1 CC-BY-4.0.
-See [the feature validation report](.specs/features/meeting-recordings/validation.md)
-for measured results and hardware/upgrade checks still requiring a real installation.
+See [the installation/release validation](.specs/features/meeting-recordings/install-validation-2026-10-20.md)
+and [the provider/UI work](.specs/features/provider-compatibility-unified-window/spec.md)
+for measured results and the scope of real versus simulated API validation.
