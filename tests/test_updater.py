@@ -18,6 +18,12 @@ class UpdaterTests(unittest.TestCase):
         self.local = patch.dict(os.environ, {"LOCALAPPDATA": str(self.root / "local")})
         self.local.start()
         self.addCleanup(self.local.stop)
+        # These tests simulate program binaries only. Never consult or change
+        # the actual user's shortcuts/registry from the helper test fixtures.
+        for name in ("snapshot_integration", "restore_integration"):
+            mocked = patch.object(update_helper, name)
+            setattr(self, name, mocked.start())
+            self.addCleanup(mocked.stop)
         self.payload = b"a complete fake installer"
         self.version = "9.0.0"
         self.update = updater.UpdateInfo(self.version, "v9.0.0",
@@ -122,6 +128,8 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual(update_helper.apply_update(path), 0)
         self.assertEqual(events, ["exit", "install"])
         self.assertEqual(json.loads((path.parent / "result.json").read_text())["status"], "updated")
+        self.snapshot_integration.assert_called_once()
+        self.restore_integration.assert_not_called()
 
     def test_failed_installer_restores_only_program_binaries(self):
         target, path, plan = self.make_plan()
@@ -224,6 +232,63 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual(update_helper.apply_update(path), 1)
             install.assert_not_called()
             launch.assert_called_once_with(target)
+
+    def test_integration_snapshot_failure_aborts_before_installation(self):
+        target, path, plan = self.make_plan()
+        self.snapshot_integration.side_effect = OSError("shortcut backup denied")
+        with patch.object(update_helper, "wait_for_process_exit"), \
+             patch.object(update_helper.subprocess, "run") as install, \
+             patch.object(update_helper, "_launch") as launch:
+            self.assertEqual(update_helper.apply_update(path), 1)
+        install.assert_not_called()
+        self.restore_integration.assert_not_called()
+        launch.assert_called_once_with(target)
+        self.assertEqual((target / "Pace.exe").read_bytes(), b"old binary")
+
+    def test_integration_is_restored_on_failure_but_not_after_success(self):
+        target, path, plan = self.make_plan()
+        with patch.object(update_helper, "wait_for_process_exit"), \
+             patch.object(update_helper.subprocess, "run", return_value=MagicMock(returncode=5)), \
+             patch.object(update_helper, "_launch"):
+            self.assertEqual(update_helper.apply_update(path), 1)
+        self.snapshot_integration.assert_called_once_with(target, path.parent / "backup" / "integration")
+        self.restore_integration.assert_called_once_with(target, path.parent / "backup" / "integration")
+
+    def test_integration_rollback_error_is_reported_and_backup_is_retained(self):
+        target, path, plan = self.make_plan()
+        self.restore_integration.side_effect = OSError("registry denied")
+        with patch.object(update_helper, "wait_for_process_exit"), \
+             patch.object(update_helper.subprocess, "run", return_value=MagicMock(returncode=5)), \
+             patch.object(update_helper, "_launch") as launch:
+            self.assertEqual(update_helper.apply_update(path), 1)
+        outcome = json.loads((path.parent / "result.json").read_text())
+        self.assertIn("registry denied", outcome["rollback_error"])
+        self.assertTrue((path.parent / "backup" / "Pace.exe").is_file())
+        launch.assert_called_once_with(target)
+
+    def test_integration_and_relaunch_failures_are_both_reported(self):
+        target, path, plan = self.make_plan()
+        self.restore_integration.side_effect = OSError("registry denied")
+        with patch.object(update_helper, "wait_for_process_exit"), \
+             patch.object(update_helper.subprocess, "run", return_value=MagicMock(returncode=5)), \
+             patch.object(update_helper, "_launch", side_effect=OSError("launch denied")):
+            self.assertEqual(update_helper.apply_update(path), 1)
+        outcome = json.loads((path.parent / "result.json").read_text())
+        self.assertIn("registry denied", outcome["rollback_error"])
+        self.assertIn("launch denied", outcome["rollback_error"])
+        self.assertEqual(outcome["status"], "failed")
+
+    def test_binary_restore_failure_does_not_launch_incomplete_application(self):
+        target, path, plan = self.make_plan()
+        with patch.object(update_helper, "wait_for_process_exit"), \
+             patch.object(update_helper.subprocess, "run", return_value=MagicMock(returncode=5)), \
+             patch.object(update_helper, "_restore", side_effect=OSError("runtime locked")), \
+             patch.object(update_helper, "_launch") as launch:
+            self.assertEqual(update_helper.apply_update(path), 1)
+        launch.assert_not_called()
+        self.restore_integration.assert_not_called()
+        outcome = json.loads((path.parent / "result.json").read_text())
+        self.assertIn("runtime locked", outcome["rollback_error"])
 
     def test_receipt_outside_cache_is_not_written(self):
         invalid = self.root / "confirmed.json"

@@ -15,6 +15,7 @@ from pathlib import Path
 from whisper_dictation.updater import (
     UpdateError, _parse_version, hidden_process_options, update_cache_root, validate_installer,
 )
+from whisper_dictation.update_integration import snapshot_integration, restore_integration
 
 _logger = logging.getLogger("whisper_dictation.update_helper")
 
@@ -154,6 +155,7 @@ def apply_update(plan_path: Path) -> int:
         wait_for_process_exit(int(plan["parent_pid"]))
         parent_exited = True
         _snapshot(target, backup)
+        snapshot_integration(target, backup / "integration")
         Path(plan["receipt"]).unlink(missing_ok=True)
         installation_started = True
         result = subprocess.run(
@@ -179,11 +181,25 @@ def apply_update(plan_path: Path) -> int:
                     process.terminate()
                     process.wait(timeout=15)
                 _restore(target, backup)
-                _launch(target)
-                _logger.info("Binários anteriores restaurados; dados preservados.")
             except Exception as restore_exc:
                 rollback_error = str(restore_exc)
                 _logger.exception("Rollback falhou; backup preservado em %s.", backup)
+            else:
+                # A locked shortcut/registry key must not prevent reopening the
+                # restored application. Keep both errors and the recovery backup.
+                errors = []
+                try:
+                    restore_integration(target, backup / "integration")
+                except Exception as integration_exc:
+                    errors.append(f"Integração: {integration_exc}")
+                    _logger.exception("Integração não restaurada por completo; backup em %s.", backup)
+                try:
+                    _launch(target)
+                except Exception as restart_exc:
+                    errors.append(f"Reabertura: {restart_exc}")
+                    _logger.exception("Binários restaurados, mas não foi possível reabrir o PACE.")
+                rollback_error = "; ".join(errors) or None
+                _logger.info("Binários anteriores restaurados; dados preservados.")
         elif parent_exited:
             try:
                 _launch(target)
