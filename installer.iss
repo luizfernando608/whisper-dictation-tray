@@ -34,7 +34,9 @@ Type: files; Name: "{userdesktop}\Whisper Dictation.lnk"
 Type: files; Name: "{userstartup}\Whisper Dictation.lnk"
 
 [Files]
-Source: "dist\Pace\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Inference does not use ONNX test fixtures or C++ build headers. Shipping them
+; can exceed Windows path limits when installing under a longer profile path.
+Source: "dist\Pace\*"; DestDir: "{app}"; Excludes: "\_internal\onnx\backend\test\*,\_internal\torch\include\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\PACE"; Filename: "{app}\Pace.exe"; Parameters: "--recordings"
