@@ -60,4 +60,12 @@ O candidato foi servido por um transporte simulado, mantendo os URLs de release 
 
 O instalador, hash e notas locais `Output/RELEASE-v1.5.0.md` estão prontos para publicação como release estável. Após a publicação, conferir `/releases/latest`, nome/tamanho/digest do asset e descoberta pelo updater antigo antes de declarar o caminho online liberado.
 
+## Publicação e validação online concluídas
+
+Após autorização explícita do usuário, v1.5.0 foi publicada como release estável/latest em 20/10/2026 às 22:58:12 UTC: https://github.com/luizfernando608/whisper-dictation-tray/releases/tag/v1.5.0. A tag remota aponta para `60984adfc490f0849dbf9c33b8f29a7f11b7d045`, o commit registrado no manifesto do pacote. O único asset é `Pace_Installer.exe`; tamanho e digest calculados pelo GitHub correspondem ao instalador validado.
+
+O ensaio em `C:/Users/ziull/Documents/pace-published-update-validation-20261020/report.json` passou sem transporte simulado: `/releases/latest` público retornou 1.5.0; o código extraído do executável 1.4 detectou a nova versão e baixou os 327.443.171 bytes reais em 27,33 s; tamanho e SHA-256 foram conferidos com o pacote testado. O updater atual também validou a descoberta quando comparado à versão 1.4, e a versão 1.5 reportou corretamente que já está atualizada. Evidência resumida adicional em `Output/Pace_Installer.published.json`.
+
+O instalador baixado neste último ensaio não foi executado novamente: instalação, upgrade e rollback desse mesmo hash já passaram nos ensaios reais anteriores. O caminho público de descoberta e download está liberado para os computadores com 1.4; não é necessário copiar manualmente o instalador. A prévia deste computador já está em 1.5 e não oferecerá reinstalar a mesma versão.
+
 Relatórios privados (sem transcrição nos resumos): diretórios `PACE-Install-Validation-20261020` em dados locais e `pace-*-validation-20261020`/`pace-rollback-before-fix` em Documents. Logs de compilação/testes em `temp/`, ignorados pelo Git. Áudio e credenciais não são incluídos no repositório nem no instalador.
