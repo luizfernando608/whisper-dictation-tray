@@ -50,4 +50,14 @@ A prévia em `%LOCALAPPDATA%/PACE-Preview-1.5.0` usa o mesmo EXE validado. O EXE
 
 Resultado: candidato aprovado para a distribuição pessoal pretendida, sem falhas bloqueantes restantes nos ensaios executados. Publicação não realizada: outros computadores só verão a atualização automática após um release.
 
+## Verificação adicional do botão de atualização
+
+O endpoint real `/releases/latest` foi consultado novamente após a solicitação do usuário: retorna `v1.4.0`, publicada em 27/09/2026, com um único `Pace_Installer.exe`. Não há release/tag v1.5.0. As verificações reais de rede do updater 1.4 e do updater atual retornaram ausência de versão mais nova, como esperado.
+
+Em `C:/Users/ziull/Documents/pace-update-button-validation-99c22da5/report.json`, quatro verificações passaram: consulta real do endpoint; descoberta e cópia completa do instalador candidato pelo código extraído do EXE 1.4 instalado; botão Tk real com preparação, tamanho/SHA-256, transição para “Reiniciar para atualizar” e encaminhamento ao callback; versão 1.5 recusando reinstalar a mesma 1.5.
+
+O candidato foi servido por um transporte simulado, mantendo os URLs de release esperados; não é evidência de download público da 1.5, que ainda não foi publicada. O callback desse ensaio não reiniciou nem instalou o aplicativo. A aplicação efetiva do instalador e o helper foram validados nos ensaios reais anteriores. O 1.4 possui o fluxo antigo de abrir o instalador; o reinício pelo novo helper passa a existir após atualizar para 1.5. A prévia atual já é 1.5 e não oferecerá reinstalar essa mesma versão.
+
+O instalador, hash e notas locais `Output/RELEASE-v1.5.0.md` estão prontos para publicação como release estável. Após a publicação, conferir `/releases/latest`, nome/tamanho/digest do asset e descoberta pelo updater antigo antes de declarar o caminho online liberado.
+
 Relatórios privados (sem transcrição nos resumos): diretórios `PACE-Install-Validation-20261020` em dados locais e `pace-*-validation-20261020`/`pace-rollback-before-fix` em Documents. Logs de compilação/testes em `temp/`, ignorados pelo Git. Áudio e credenciais não são incluídos no repositório nem no instalador.
