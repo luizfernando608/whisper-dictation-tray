@@ -16,4 +16,4 @@ A 1.5.0 foi publicada e sua descoberta/download reais pela 1.4 foram validados. 
 
 ## Premissas e limites
 
-Reutilizar CustomTkinter, biblioteca e formulário existentes. A UI permanece em processo dedicado com o Tk no thread principal. Sem redesenho de toda a aplicação, troca de framework ou nova dependência de conta para diarização. Neste início só Groq tem chave cadastrada; teste real Gemini/OpenAI depende de configuração segura pelo usuário, já solicitada.
+Reutilizar CustomTkinter, biblioteca e formulário existentes. A UI permanece em processo dedicado com o Tk no thread principal. Sem redesenho de toda a aplicação, troca de framework ou nova dependência de conta para diarização. Neste computador só Groq tem chave cadastrada. O usuário escolheu validar Gemini/OpenAI sem chaves nesta etapa: SDKs reais com transporte HTTP controlado; validação de conta/quota real fica explicitamente pendente.

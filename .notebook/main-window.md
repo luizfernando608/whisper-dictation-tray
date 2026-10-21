@@ -9,3 +9,7 @@
 As reuniões continuam usando o provedor de timestamps configurado em `meeting_processing.py:_effective_provider()` (Groq, whisper-1 ou local); os novos adaptadores de ditado não alteram essa política. Não confundir suporte de entrada de áudio do catálogo com integração de timestamps no pipeline de reuniões.
 
 Fontes oficiais, decisões e resultados em `.specs/features/provider-compatibility-unified-window/`. Usuário escolheu validar sem chaves Gemini/OpenAI; os testes usam SDKs reais com transporte HTTP controlado e não comprovam quota/permissão de conta real.
+
+Validação 1.5.1: suíte completa 226 casos (um skip Windows/symlink), mais oito casos do validador de captura; revisão independente sem achados pendentes. Instalador separado em `Output/v1.5.1`, EXE/source-code objects iguais para 32 módulos + main. Instalação limpa, upgrade real 1.5.0→1.5.1, rollback integral e captura física de 128,188 s/processamento aprovados. Evidências e hashes em `validation.md`.
+
+No Windows, leitura de `runtime.json` pode falhar brevemente com PermissionError mesmo com captura ativa: o validador opt-in registra a falha e espera até dois segundos por telemetria válida, sem tolerar snapshots válidos inativos ou ID diferente. Não inferir parada a partir de `{}` produzido por um leitor que engole erros. A prévia dentro do Codex sofre redirecionamento MSIX de AppData; novos atalhos precisam do caminho físico do diretório resolvido, não de um caminho inexistente ainda não redirecionado.
