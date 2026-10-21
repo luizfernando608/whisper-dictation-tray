@@ -211,6 +211,8 @@ def main():
     parser.add_argument("--version", default="1.5.0", help="Expected candidate version")
     parser.add_argument("--old-version", default="1.4.0", help="Expected rollback version")
     parser.add_argument("--single-window", action="store_true", help="Verify settings reuse the library window")
+    parser.add_argument("--expected-failure", choices=("confirmation", "installer"), default="confirmation",
+                        help="Rollback scenario; installer mode requires an intentional failing fixture")
     args = parser.parse_args()
     root, preview = args.output.resolve(), args.preview.resolve()
     assert root != preview and not root.is_relative_to(preview) and not preview.is_relative_to(root)
@@ -486,11 +488,14 @@ def main():
             record("real_upgrade_confirmed", receipt_version=json.loads((staging / "confirmed.json").read_text())["version"],
                    persistent_hashes_match=True, result=outcome, effective_limit=configuration["max_record_seconds"])
         else:
-            assert "confirmou inicialização" in outcome.get("error", ""), "Expected confirmation failure, not a different installation error"
+            if args.expected_failure == "installer":
+                assert "Instalador retornou código" in outcome.get("error", ""), "Expected a native installer failure"
+            else:
+                assert "confirmou inicialização" in outcome.get("error", ""), "Expected confirmation failure, not a different installation error"
             assert digest(target / "Pace.exe") == old_hash
             assert runtime_manifest(target) == old_runtime, "Rollback must restore every runtime file"
             assert probe()
-            record("confirmation_failure_restores_old_exe_and_runtime", runtime_files_verified=len(old_runtime), persistent_hashes_match=True, result=outcome)
+            record(f"{args.expected_failure}_failure_restores_old_exe_and_runtime", runtime_files_verified=len(old_runtime), persistent_hashes_match=True, result=outcome)
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as key:
                 registered_version = winreg.QueryValueEx(key, "DisplayVersion")[0]
             record("rollback_registration_version", version=registered_version)
