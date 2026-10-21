@@ -174,8 +174,32 @@ def validate_ui_marker(marker, identity):
     """Require the external native-UI driver's attestation for this exact run."""
     assert marker.get("run_id") == identity["run_id"], "UI marker belongs to another run"
     for name in ("target", "temporary"):
-        assert Path(marker[name]).resolve() == Path(identity[name]).resolve(), "UI marker path mismatch"
+        if name in identity:
+            assert Path(marker[name]).resolve() == Path(identity[name]).resolve(), "UI marker path mismatch"
     assert marker.get("version") == identity["version"], "UI marker version mismatch"
+
+
+def observe_restart_helpers(cache, owned, records):
+    """Retain real process identities while the driver operates the restart UI."""
+    runs = (cache / "runs").resolve()
+    seen = {item["pid"] for item in records}
+    for process in psutil.process_iter(["exe"]):
+        try:
+            if not process.info["exe"]:
+                continue
+            executable = Path(process.info["exe"]).resolve()
+            if executable.name.lower() != "paceupdatehelper.exe" or executable.parent.name != "helper" or not executable.is_relative_to(runs):
+                continue
+            owned[(process.pid, process.create_time())] = process
+            if process.pid not in seen:
+                records.append({"pid": process.pid, "executable": str(executable), "parent_pid": process.ppid(),
+                                "command": process.cmdline(), "observation": "owned helper path via psutil"})
+                seen.add(process.pid)
+            for child in process.children(recursive=True):
+                if Path(child.exe()).resolve().is_relative_to(cache):
+                    owned[(child.pid, child.create_time())] = child
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
 
 
 def start(target, environment, legacy=False, expected_version=None):
@@ -206,24 +230,25 @@ def main():
     parser.add_argument("--old-installer", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--preview", required=True, type=Path)
-    parser.add_argument("--phase", choices=("install", "rollback", "legacy", "legacy-ui"), default="install")
+    parser.add_argument("--phase", choices=("install", "rollback", "legacy", "legacy-ui", "restart-ui"), default="install")
     parser.add_argument("--helper-source", type=Path, help="Previously clean-installed candidate used by the rollback test")
     parser.add_argument("--version", default="1.5.0", help="Expected candidate version")
-    parser.add_argument("--old-version", default="1.4.0", help="Expected rollback version")
+    parser.add_argument("--old-version", help="Expected baseline version; restart-ui defaults to 1.5.0, other phases to 1.4.0")
     parser.add_argument("--single-window", action="store_true", help="Verify settings reuse the library window")
     parser.add_argument("--expected-failure", choices=("confirmation", "installer"), default="confirmation",
                         help="Rollback scenario; installer mode requires an intentional failing fixture")
     args = parser.parse_args()
+    args.old_version = args.old_version or ("1.5.0" if args.phase == "restart-ui" else "1.4.0")
     root, preview = args.output.resolve(), args.preview.resolve()
     assert root != preview and not root.is_relative_to(preview) and not preview.is_relative_to(root)
     assert not root.exists(), "Choose an entirely fresh validation output directory"
     assert args.old_installer.is_file() and not args.old_installer.resolve().is_relative_to(root)
-    if args.phase not in {"legacy", "legacy-ui"}:
+    if args.phase not in {"legacy", "legacy-ui", "restart-ui"}:
         assert args.installer and args.installer.is_file() and not args.installer.resolve().is_relative_to(root)
     else:
-        assert args.old_version == "1.4.0"
+        assert args.old_version == ("1.5.0" if args.phase == "restart-ui" else "1.4.0")
         from validate_legacy_update import verify_public_installer
-        public_baseline = verify_public_installer(args.old_installer, "1.4.0")
+        public_baseline = verify_public_installer(args.old_installer, args.old_version)
     # The hardware harness also checks queued processing and dictation lifecycle;
     # importing is safe, but no hardware capture is performed here.
     from validate_installed_capture import assert_preview_idle
@@ -237,7 +262,7 @@ def main():
     environment["LOCALAPPDATA"] = str(Path.home() / "Documents" / ("pace-validation-data-" + uuid.uuid4().hex[:8]))
     assert not Path(environment["LOCALAPPDATA"]).exists(), "Isolated app data directory must be fresh"
     environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
-    if args.phase == "legacy-ui":
+    if args.phase in {"legacy-ui", "restart-ui"}:
         ui_temporary = root / "windows-temp"
         ui_temporary.mkdir()
         # The actual frozen old tray, settings UI and its real installer all
@@ -245,7 +270,7 @@ def main():
         environment.update(TEMP=str(ui_temporary), TMP=str(ui_temporary))
     report = {"phase": args.phase, "installer_sha256": digest(args.installer) if args.installer else None,
               "old_installer_sha256": digest(args.old_installer), "isolated_localappdata": environment["LOCALAPPDATA"], "checks": []}
-    if args.phase in {"legacy", "legacy-ui"}:
+    if args.phase in {"legacy", "legacy-ui", "restart-ui"}:
         report["public_baseline"] = public_baseline
     def record(name, **fields):
         report["checks"].append({"name": name, **fields})
@@ -292,7 +317,7 @@ def main():
         assert target.is_relative_to(root) and target != root, "Installation must stay under validation output"
         process = subprocess.Popen([str(installer.resolve()), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-",
                                  "/NOCLOSEAPPLICATIONS", f"/DIR={target}", f"/LOG={log}"],
-                                cwd=root, env=environment if args.phase == "legacy-ui" else None,
+                                cwd=root, env=environment if args.phase in {"legacy-ui", "restart-ui"} else None,
                                 **hidden_process_options())
         try:
             code = process.wait(timeout=600)
@@ -348,6 +373,91 @@ def main():
         store.update(row["id"], status="ready", duration=12, speaker_names={"SPEAKER_00": "Validation speaker"})
         preserved = {str(path.relative_to(target)): digest(path) for path in (
             target / "config.json", target / ".env", target / "models" / "keep.txt", store.directory(row["id"]) / "keep.txt")}
+        if args.phase == "restart-ui":
+            from validate_legacy_update import registered_target, verify_public_installer
+            assert registered_target() == (target, args.old_version)
+            assert send_command(OPEN_SETTINGS)
+            wait_for(lambda: any("Configura" in title for _, title in windows(target)), description="actual public 1.5 settings UI")
+            old_pids = {process.pid for process in processes(target)}
+            identity = {"run_id": uuid.uuid4().hex, "target": str(target), "version": args.version,
+                        "old_version": args.old_version, "old_executable_sha256": old_hash,
+                        "harness_pid": os.getpid(), "settings_visible": True}
+            cache = Path(environment["LOCALAPPDATA"]) / "PaceData" / "updates"
+            ready = root / "restart-ui-ready.json"
+            partial = ready.with_suffix(".partial")
+            partial.write_text(json.dumps(identity, indent=2), encoding="utf-8")
+            partial.replace(ready)
+            record("restart_ui_ready_for_native_driver", **identity)
+            complete, failed = root / "restart-ui-complete.json", root / "restart-ui-failed.json"
+            observed = []
+            marker = None
+            result_path = None
+            deadline = time.monotonic() + 2400
+            while True:
+                # Observe before checking markers so even a fast failure retains
+                # the helper identity for finally, including a helper waiting on
+                # the old parent. No PID is reconstructed for termination.
+                observe_restart_helpers(cache, ui_owned, observed)
+                if failed.is_file():
+                    failure = json.loads(failed.read_text(encoding="utf-8-sig"))
+                    validate_ui_marker(failure, identity)
+                    record("restart_ui_failed", ui_error=failure.get("error", "Native UI driver reported failure"),
+                           physical_button_clicked=bool(failure.get("physical_button_clicked")), observed_helpers=observed)
+                    raise RuntimeError("Native restart UI driver reported an error; see report")
+                if marker is None and complete.is_file():
+                    marker = json.loads(complete.read_text(encoding="utf-8-sig"))
+                    validate_ui_marker(marker, identity)
+                    assert marker.get("physical_button_clicked") is True, "Native update/restart button attestation required"
+                if marker is not None:
+                    results = list((cache / "runs").glob("*/result.json"))
+                    assert len(results) <= 1, "Unexpected multiple update runs in a fresh isolated cache"
+                    if results:
+                        try:
+                            outcome = json.loads(results[0].read_text(encoding="utf-8"))
+                        except (OSError, ValueError):
+                            pass  # The original public helper writes this file directly.
+                        else:
+                            result_path = results[0]
+                            break
+                if time.monotonic() >= deadline:
+                    record("restart_ui_harness_timeout", timeout_seconds=2400, application_failure_confirmed=False,
+                           physical_button_clicked=bool(marker), observed_helpers=observed)
+                    raise TimeoutError("Native restart validation exceeded the harness wait")
+                time.sleep(.25)
+            assert outcome["status"] == "updated" and outcome["version"] == args.version, outcome
+            run = result_path.parent
+            plan = json.loads((run / "plan.json").read_text(encoding="utf-8"))
+            assert plan["parent_pid"] in old_pids and plan["version"] == args.version
+            assert Path(plan["target"]).resolve() == target
+            helper_exe = run / "helper" / "PaceUpdateHelper.exe"
+            assert digest(helper_exe) == old_hash, "Helper must be staged from the actual public baseline EXE"
+            assert any(Path(item["executable"]).resolve() == helper_exe.resolve() for item in observed), "Real staged helper was not observed"
+            downloaded = Path(plan["installer"]).resolve()
+            assert downloaded == (cache / args.version / "Pace_Installer.exe").resolve()
+            public_download = verify_public_installer(downloaded, args.version)
+            assert plan["sha256"].lower() == public_download["sha256"].lower() and plan["size"] == public_download["size"]
+            receipt_path = Path(plan["receipt"]).resolve()
+            assert receipt_path == (run / "confirmed.json").resolve()
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            assert receipt["version"] == args.version and receipt["token"] == plan["token"]
+            assert Path(receipt["target"]).resolve() == target
+            wait_for(probe, description="new app after real restart")
+            state = request(CAPABILITIES)
+            assert state["version"] == args.version and Path(state["project_root"]).resolve() == target
+            assert receipt["pid"] in {process.pid for process in processes(target)}
+            assert registered_target() == (target, args.version)
+            for name, checksum in preserved.items():
+                assert digest(target / name) == checksum, f"Persistent data changed: {name}"
+            assert RecordingStore(target / "recordings").get(row["id"])["speaker_names"] == {"SPEAKER_00": "Validation speaker"}
+            record("actual_public_app_restart_update", physical_button_clicked=True, native_ui_attestation=marker,
+                   source_injection=False, simulated_transport=False, candidate_seeded=False,
+                   baseline_client_version=args.old_version, helper_scope="actual old public client; no new readiness protocol synthesized",
+                   actual_network_download=True, downloaded_sha256=public_download["sha256"], downloaded_bytes=public_download["size"],
+                   observed_helpers=observed, helper_sha256=old_hash, parent_pid_verified=True,
+                   confirmation_receipt_verified=True, persistent_hashes_match=True, registry_target_verified=True,
+                   result=outcome)
+            report["passed"] = True
+            return 0
         if args.phase == "legacy-ui":
             from validate_legacy_update import registered_target, verify_public_installer
             assert registered_target() == (target, "1.4.0")
@@ -505,11 +615,18 @@ def main():
             record("rollback_integration_restored", shortcuts=True, uninstallers=True, registry=True)
         report["passed"] = True
     finally:
+        checks_passed = bool(report.get("passed"))
+        report["passed"] = False  # Success is published only after host/preview restoration.
         cleanup_errors = []
         try:
             stop_tree(helper)
         except Exception as exc:
             cleanup_errors.append(str(exc))
+        if args.phase == "restart-ui":
+            try:
+                observe_restart_helpers(Path(environment["LOCALAPPDATA"]) / "PaceData" / "updates", ui_owned, [])
+            except Exception as exc:
+                cleanup_errors.append(f"Owned helper cleanup scan: {exc}")
         for process in reversed(list(ui_owned.values())):
             try:
                 stop_tree(process)
@@ -522,6 +639,20 @@ def main():
                 stop(target)
             except Exception as exc:
                 cleanup_errors.append(str(exc))
+        # A staging thread may have launched its detached helper while the old
+        # app was closing. Catch that exact owned process before host restoration.
+        if args.phase == "restart-ui":
+            try:
+                observe_restart_helpers(Path(environment["LOCALAPPDATA"]) / "PaceData" / "updates", ui_owned, [])
+            except Exception as exc:
+                cleanup_errors.append(f"Late owned helper cleanup scan: {exc}")
+            for process in reversed(list(ui_owned.values())):
+                try:
+                    stop_tree(process)
+                except psutil.NoSuchProcess:
+                    pass
+                except Exception as exc:
+                    cleanup_errors.append(f"Late owned helper cleanup: {exc}")
         try:
             erase_registration()
             if exported:
@@ -546,7 +677,7 @@ def main():
                 preview_reopened = True
             except Exception as exc:
                 cleanup_errors.append(f"Preview restart: {exc}")
-        report["passed"] = bool(report.get("passed") and not cleanup_errors)
+        report["passed"] = bool(checks_passed and not cleanup_errors)
         record("host_restored", user_config_and_audio_hashes_match=True, original_audio_files=len(original_audio),
                preview_reopened=preview_reopened, cleanup_errors=cleanup_errors)
         (root / f"report-{args.phase}.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
