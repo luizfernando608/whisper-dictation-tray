@@ -2,7 +2,7 @@
 
 ## Estado
 
-Correção de produção no commit `d83465f`, versão 1.5.2. Revisão independente aprovada para código/pipeline/UI e gates da fonte. Pacote congelado e instalação ainda em validação; a release pública continua 1.5.1 até concluir os gates.
+Correção de produção no commit `d83465f`, versão 1.5.2. Revisão independente aprovada para código/pipeline/UI e gates da fonte, congelado e primeiro uso instalado. Instalação/upgrade/restauração do host aprovados. A release pública continua 1.5.1 até a publicação da correção.
 
 ## Incidente e reprodução
 
@@ -39,6 +39,14 @@ A primeira execução do validador havia terminado o processamento com texto/tur
 PyInstaller concluído: os code objects dos 32 módulos do pacote e main conferem com a fonte; EXE SHA256 `2af16b5adb5790aabf12741fd4fb7dca67776ad1ecdd460d295a1f7066055274`. Relatório `Output/v1.5.2/source-verification.json`. Smokes reais do EXE em ONNX CPU, OpenVINO CPU, Intel GPU e DirectML aprovados, erro máximo 4,77e-7 (`temp/auto-speakers-20261021/frozen-smoke.log`).
 
 `C:/Users/ziull/Documents/pace-speaker-fresh-frozen-20261021/Perfil João/report.json`: aprovado em caminho com espaços/acentos. Primeiro uso com cache de modelos/HF vazio e download real: 45,109 s, 18 segmentos, 25 turnos, três falantes, CPU. Segunda gravação independente com backend solicitado **auto**, cache somente CPU/sem Vulkan e ambiente offline por proxy/HF: 14,796 s, mesmos counts. Sem preparo manual, modelos semeados ou checkpoints da primeira gravação. Confirma disponibilidade/integridade nesse hardware; não mede DER ou precisão das identidades.
+
+## Instalação e primeiro uso instalado
+
+Instalador 1.5.2 concluído, 327.415.822 bytes, SHA256 `b0573e13d606c835e0be6b75dfd5d1f30f25a1c575b682711f6920ded713b18f`. Instalação limpa real abriu biblioteca/configurações em um HWND e confirmou max_record_seconds=0.
+
+`C:/Users/ziull/Documents/pace-speaker-fresh-installed-20261021/Perfil João/report.json`: aprovado usando o EXE da instalação limpa, com outro cache/HF_HOME inicialmente inexistentes. Primeiro uso CPU com downloads: 35,907 s; segunda gravação independente offline solicitando auto: 14,703 s. Ambas com 18 segmentos, 25 turnos e três falantes em CPU, sem Vulkan e sem preparo manual. O teste não abre microfones nem usa gravações privadas.
+
+`C:/Users/ziull/Documents/pace-speaker-152-install-20261021/report-install.json`: aprovado, processo exit0 e cleanup_errors vazio. Instalou o pacote limpo; instalou a baseline pública 1.5.1 real; aguardou o pai antigo e aplicou 1.5.2 via helper candidato congelado. Receipt/versão/canários/limite indefinido conferidos. Nesse gate, pacote e helper novos são semeados pelo harness: não equivale ao botão público ou download da release. Registro/atalhos foram restaurados, prévia reaberta e hashes de configuração/env e dos 20 WAVs originais preservados. Gate público pelos botões será registrado separadamente após publicação.
 
 ## Limites e compatibilidade
 
