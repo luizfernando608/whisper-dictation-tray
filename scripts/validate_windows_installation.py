@@ -246,7 +246,7 @@ def main():
     if args.phase not in {"legacy", "legacy-ui", "restart-ui"}:
         assert args.installer and args.installer.is_file() and not args.installer.resolve().is_relative_to(root)
     else:
-        assert args.old_version == ("1.5.0" if args.phase == "restart-ui" else "1.4.0")
+        assert args.old_version in ({"1.5.0", "1.5.1"} if args.phase == "restart-ui" else {"1.4.0"})
         from validate_legacy_update import verify_public_installer
         public_baseline = verify_public_installer(args.old_installer, args.old_version)
     # The hardware harness also checks queued processing and dictation lifecycle;
