@@ -11,11 +11,14 @@ Run it, and PACE will live in your system tray (near the clock).
 ## Updating
 
 The app checks GitHub for a newer release on startup and prepares the exact
-installer after checking its SHA-256 and size. Once ready, choose **Reiniciar para
-atualizar** in the tray or **Configurações → Sobre**. PACE waits for recording and
-processing to finish, closes its windows, installs silently and relaunches.
-The helper verifies that the new tray starts; on failure it restores the previous
-application binaries. Settings, credentials and the recordings library are preserved.
+installer after checking its SHA-256 and size. Interrupted or invalid downloads
+get up to three fresh attempts. Once ready, choose **Reiniciar para atualizar** in
+the tray or **Configurações → Sobre**. Finish recordings and processing before
+restarting. PACE closes its windows and confirms that its detached helper is ready
+before exiting to install silently and relaunch. If installation or startup
+verification fails, the helper restores the previous binaries, shortcuts and
+installation registration.
+Settings, credentials and the recordings library are preserved.
 
 You can still update manually by downloading and running the latest installer.
 
