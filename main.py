@@ -13,7 +13,6 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from whisper_dictation.audio import list_input_devices
 from whisper_dictation.single_instance import OPEN_SETTINGS, OPEN_RECORDINGS, CAPABILITIES, SingleInstance, probe, send_command, request
 
 
@@ -114,6 +113,8 @@ def main() -> int:
                           "recordings": str(recordings_dir(config))}, indent=2, ensure_ascii=False))
         return 0
     if args.list_devices:
+        from whisper_dictation.audio import list_input_devices
+
         devices = list_input_devices()
         if not devices:
             print("Nenhum dispositivo de entrada encontrado.")

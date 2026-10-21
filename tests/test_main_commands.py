@@ -1,3 +1,6 @@
+import importlib.util
+import sys
+import types
 import unittest
 from unittest.mock import Mock, patch
 
@@ -6,6 +9,17 @@ from whisper_dictation._version import __version__
 
 
 class MainCommandTests(unittest.TestCase):
+    def test_update_helper_entrypoint_does_not_load_audio_dependencies(self):
+        helper = types.ModuleType("whisper_dictation.update_helper")
+        helper.main = Mock(return_value=0)
+        spec = importlib.util.spec_from_file_location("pace_isolated_update_entrypoint", main.__file__)
+        entrypoint = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {"whisper_dictation.audio": None, "whisper_dictation.update_helper": helper}), \
+             patch("sys.argv", ["Pace.exe", "--apply-update", "--update-plan", "isolated-plan.json"]):
+            spec.loader.exec_module(entrypoint)
+            self.assertEqual(entrypoint.main(), 0)
+        helper.main.assert_called_once_with(["--update-plan", "isolated-plan.json"])
+
     def test_old_tray_cannot_silently_swallow_new_recordings_shortcut(self):
         instance = Mock()
         instance.try_acquire.return_value = False
