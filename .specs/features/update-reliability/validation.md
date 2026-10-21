@@ -1,5 +1,7 @@
 # Evidências — incidente de atualização em 21/10/2026
 
+Atualização posterior: a release 1.5.1 foi publicada e o fluxo real do app público1.5.0 → 1.5.1 foi aprovado. Ver [publicação e teste final](publication-2026-10-21.md). As referências a candidato local/público1.5.0 abaixo registram o estado durante a investigação anterior à publicação.
+
 Resultado técnico: todos os cinco gates abaixo foram aprovados e revisados independentemente. O candidato é local e a publicação continua em 1.5.0; a causa específica no outro PC ainda não foi confirmada. Os ensaios usam isolamento de processos/pastas/dados neste Windows x64, sem VM.
 
 ## Diagnóstico confirmado e limites

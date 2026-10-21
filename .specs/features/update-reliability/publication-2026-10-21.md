@@ -1,0 +1,13 @@
+# Publicação 1.5.1 — 21/10/2026
+
+Publicada como release estável mais recente às 18:12:18 UTC (15:12:18 Fortaleza), após o usuário exigir atualização pelo próprio PACE. Tag anotada `v1.5.1` aponta ao commit validado `db299ff280a6784df228e191868984a99176991c`.
+
+[Release](https://github.com/luizfernando608/whisper-dictation-tray/releases/tag/v1.5.1). Único asset: `Pace_Installer.exe`, 327.395.783 bytes, SHA256 `412b84b17252cf565cf2d490a6e9c158b76f6ff8adc860016cf49f07aa554fca`. O draft foi enviado primeiro e o digest/tamanho conferidos antes de publicar. A versão 1.5.0 e seu asset não foram substituídos.
+
+O código real de `check_for_update()` detectou a release pelo endpoint público. Somente a constante da versão do cliente foi ajustada para 1.5.0 neste processo de teste; rede e transporte não foram simulados. `download_installer()` baixou de novo o asset publicado em uma pasta nova e validou tamanho/SHA. Não executou o instalador nesse ensaio. Evidência: `temp/update-incident-20261021/published-1.5.1/report.json`.
+
+O teste pelo cliente público congelado 1.5.0 terminou aprovado, com exit 0: `C:/Users/ziull/Documents/pace-published151-ui-20261021/report-restart-ui.json`. O driver nativo clicou Sobre → Verificar atualizações, observou Atualização pronta: 1.5.1 e clicou Reiniciar para atualizar. O cliente antigo baixou o asset real da rede, copiou e executou seu próprio auxiliar (SHA299aad8a06801f72fcc9bca31a07216f057e7d366b20622b393ada709f66e9ab), instalou silenciosamente e reabriu 1.5.1. Não houve código injetado, transporte simulado, cache semeado ou uso do helper corrigido para contornar o cliente antigo.
+
+O harness conferiu SHA/tamanho do pacote público, PID do pai no plano, helper observado, receipt/token/PID/versão/target, CAPABILITIES, registro1.5.1 e canários. `host_restored`: 20WAVs/config/env originais intactos, prévia corrigida reaberta e `cleanup_errors=[]`. Revisor independente conferiu relatório e invariantes: sem achados. O ensaio foi em processos/pastas/dados separados deste Windows, sem comprovação no outro PC.
+
+Uma revisão do novo harness encontrou scans de processo sem proteção no finally. Foram protegidos para registrar erros e continuar restauração, mantendo passed=false em caso de erro. Um novo teste sintético do finally real, com efeitos do host mockados, forçou falha nas duas scans e conferiu a restauração/reabertura; 3 casos focados passaram no autor, root e revisor. O gate real já carregado percorreu o caminho normal sem erros de scan e passou; a proteção excepcional foi validada separadamente. Nenhuma alteração de produção ou novo build foi necessária após publicar.
