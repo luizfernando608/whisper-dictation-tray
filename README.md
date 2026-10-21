@@ -45,9 +45,13 @@ You can still update manually by downloading and running the latest installer.
   without changing the original file. WAV, MP3, M4A, OGG, FLAC, MP4 and MKV are
   supported through the bundled decoder; no system FFmpeg installation is needed.
 
-Before the first transcription with speaker identification, open **Configurações
-→ Reuniões → Preparar modelos**. The default **Nemotron 3** downloads public model
-weights and native runtimes without an account or token, then works locally.
+The default **Nemotron 3** automatically prepares missing or incomplete model
+assets when processing a recording. Download and setup progress appears in the
+library; audio and transcription checkpoints are preserved if setup fails.
+You can also prepare them in advance through **Configurações → Reuniões →
+Preparar modelos**. Public weights and native runtimes need no account or token
+and work locally once prepared. CPU processing remains available if the optional
+Vulkan runtime cannot be prepared; the official Windows CPU runtime requires AVX2.
 It automatically estimates up to eight speakers. CPU and Vulkan GPU execution
 are compared against CPU results and timed; automatic selection retains the fastest
 validated option and falls back to CPU when a GPU fails. GPU availability depends

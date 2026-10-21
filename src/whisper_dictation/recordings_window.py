@@ -23,10 +23,10 @@ from whisper_dictation.single_instance import MEETING_PAUSE, MEETING_TOGGLE, CAP
 from whisper_dictation.ui_utils import close_window, fit_window, window_work_area
 
 STATUS = {"new": "Preparando gravação", "starting": "Iniciando gravação", "queued": "Na fila", "recording": "Gravando", "paused": "Pausada", "finalizing": "Salvando áudio",
-          "processing": "Preparando", "importing": "Importando", "transcribing": "Transcrevendo",
+          "processing": "Preparando", "preparing": "Preparando modelos", "importing": "Importando", "transcribing": "Transcrevendo",
           "diarizing": "Identificando falantes", "ready": "Pronta", "failed": "Falha",
           "cancelled": "Cancelada", "cancelling": "Cancelando", "interrupted": "Interrompida"}
-BUSY = {"new", "starting", "queued", "recording", "paused", "finalizing", "processing", "importing", "transcribing", "diarizing", "cancelling"}
+BUSY = {"new", "starting", "queued", "recording", "paused", "finalizing", "processing", "preparing", "importing", "transcribing", "diarizing", "cancelling"}
 
 # A restrained extension of the PACE palette. Blue is reserved for the primary
 # action; surfaces and secondary controls stay neutral.
@@ -374,7 +374,7 @@ class RecordingsWindow:
         row = self.row()
         if row:
             details = [row["title"], STATUS.get(row["status"], row["status"])]
-            details.extend(str(row[key]) for key in ("backend", "error", "fallback_reason", "transcription_warning") if row.get(key))
+            details.extend(str(row[key]) for key in ("stage", "backend", "error", "fallback_reason", "transcription_warning") if row.get(key))
             messagebox.showinfo("Detalhes do processamento", "\n\n".join(details), parent=self.root)
 
     def row(self):
@@ -604,13 +604,17 @@ class RecordingsWindow:
                 self.seek.configure(to=max(1, self.player.duration))
             except Exception as exc:
                 audio_error = f"Não foi possível abrir o áudio: {exc}"
-        warning = audio_error or row.get("error") or row.get("transcription_warning")
+        processing = row["status"] in BUSY - {"recording", "paused", "starting", "new", "finalizing"}
+        warning = audio_error or row.get("error") or (row.get("transcription_warning") if not processing else None)
         if warning:
             summary = " ".join(str(warning).split())
             self.set_notice(summary if len(summary) <= 150 else summary[:147] + "… Veja os detalhes no menu •••.")
-        elif row["status"] in BUSY - {"recording", "paused", "starting", "new", "finalizing"}:
+        elif processing:
             progress = float(row.get("progress", 0))
-            self.set_notice(f"{STATUS.get(row['status'], row['status'])} · {round(progress * 100 if progress <= 1 else progress)}%")
+            stage = " ".join(str(row.get("stage") or "").split()) or STATUS.get(row["status"], row["status"])
+            if len(stage) > 140:
+                stage = stage[:137] + "…"
+            self.set_notice(f"{stage} · {round(progress * 100 if progress <= 1 else progress)}%")
         else:
             self.notice.pack_forget()
         self.copy_button.configure(state="normal" if self.has_transcript() else "disabled")
@@ -921,7 +925,7 @@ class RecordingsWindow:
                 messagebox.showerror("Recuperar áudio", str(exc), parent=self.root)
                 return
         (directory / "cancel.request").unlink(missing_ok=True)
-        self.store.transition(row["id"], {"failed", "interrupted", "cancelled", "ready"}, "queued", error="", progress=0)
+        self.store.transition(row["id"], {"failed", "interrupted", "cancelled", "ready"}, "queued", error="", progress=0, stage=STATUS["queued"])
         self.refresh_list()
 
     def cancel(self):

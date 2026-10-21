@@ -18,7 +18,10 @@ import sys
 import tempfile
 import time
 import urllib.request
+import urllib.error
 import zipfile
+from contextlib import contextmanager
+from http.client import IncompleteRead
 from pathlib import Path, PurePosixPath
 
 import numpy as np
@@ -40,38 +43,105 @@ RUNTIMES = {
 }
 
 
-def _download(url: str, destination: Path, size: int, digest: str, progress=None):
+def _check_cancel(cancelled):
+    if cancelled and cancelled():
+        raise ProcessingCancelled()
+
+
+def _pause(seconds, cancelled):
+    for _ in range(round(seconds * 10)):
+        _check_cancel(cancelled)
+        time.sleep(0.1)
+
+
+def _fetch(url, destination, maximum, *, size=None, digest=None, progress=None, cancelled=None):
+    """Unique partial file, bounded reads, atomic promotion and transient retries."""
+    request = urllib.request.Request(url, headers={"User-Agent": "PACE-model-preparation"})
+    for attempt in range(3):
+        _check_cancel(cancelled)
+        fd, name = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".pending", dir=destination.parent)
+        pending = Path(name)
+        try:
+            with os.fdopen(fd, "wb") as output, urllib.request.urlopen(request, timeout=15) as response:
+                if not response.url.startswith("https://"):
+                    raise RuntimeError("Download redirecionou para protocolo inseguro.")
+                received = 0
+                while True:
+                    _check_cancel(cancelled)
+                    block = response.read(1024 * 1024)
+                    if not block:
+                        break
+                    received += len(block)
+                    if received > maximum:
+                        raise RuntimeError("Artefato excedeu o tamanho esperado.")
+                    output.write(block)
+                    if progress:
+                        progress(received / maximum)
+            _check_cancel(cancelled)
+            if not received or (size is not None and received != size):
+                raise urllib.error.URLError("Download incompleto; conexão interrompida.")
+            if digest is not None and _hash(pending) != digest:
+                raise RuntimeError("Checksum do artefato NVIDIA não corresponde ao publicado.")
+            os.replace(pending, destination)
+            return
+        except (urllib.error.URLError, TimeoutError, ConnectionError, IncompleteRead) as exc:
+            transient = not isinstance(exc, urllib.error.HTTPError) or exc.code in {408, 425, 429, 500, 502, 503, 504}
+            if not transient or attempt == 2:
+                raise RuntimeError("Não foi possível preparar o diarizador local. Verifique a conexão e tente novamente na gravação ou em Preparar modelos.") from exc
+            _pause(attempt + 1, cancelled)
+        finally:
+            pending.unlink(missing_ok=True)
+
+
+def _download(url: str, destination: Path, size: int, digest: str, progress=None, cancelled=None):
+    _check_cancel(cancelled)
     if destination.is_file() and destination.stat().st_size == size and _hash(destination) == digest:
         return
-    pending = destination.with_suffix(destination.suffix + ".pending")
-    received = 0
-    request = urllib.request.Request(url, headers={"User-Agent": "PACE-model-preparation"})
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response, pending.open("wb") as output:
-            if not response.url.startswith("https://"):
-                raise RuntimeError("Download redirecionou para protocolo inseguro.")
-            while True:
-                block = response.read(1024 * 1024)
-                if not block:
-                    break
-                received += len(block)
-                if received > size:
-                    raise RuntimeError("Artefato excedeu o tamanho esperado.")
-                output.write(block)
-                if progress:
-                    progress(received / size)
-        if received != size or _hash(pending) != digest:
-            raise RuntimeError("Checksum ou tamanho do artefato NVIDIA não corresponde ao publicado.")
-        os.replace(pending, destination)
-    finally:
-        pending.unlink(missing_ok=True)
+    _fetch(url, destination, size, size=size, digest=digest, progress=progress, cancelled=cancelled)
 
 
-def _extract(archive: Path, destination: Path):
+@contextmanager
+def _cache_lock(root: Path, cancelled=None, progress=None):
+    """OS-owned lock releases on process exit; never unlink its shared inode."""
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / "prepare.lock").open("a+b") as stream:
+        stream.seek(0, os.SEEK_END)
+        if stream.tell() == 0:
+            stream.write(b"0")
+            stream.flush()
+        last_report = -5.0
+        while True:
+            _check_cancel(cancelled)
+            try:
+                stream.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if progress and time.monotonic() - last_report >= 5:
+                    progress("Aguardando preparação dos modelos por outro processo…", 0.0)
+                    last_report = time.monotonic()
+                _pause(0.1, cancelled)
+        try:
+            yield
+        finally:
+            stream.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def _extract(archive: Path, destination: Path, cancelled=None):
     destination.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive) as source:
         total = 0
         for info in source.infolist():
+            _check_cancel(cancelled)
             name = PurePosixPath(info.filename.replace("\\", "/"))
             if name.is_absolute() or ".." in name.parts or ":" in str(name) or (info.external_attr >> 16) & 0o170000 == 0o120000:
                 raise ValueError("Arquivo ZIP contém caminho ou link inválido.")
@@ -81,7 +151,9 @@ def _extract(archive: Path, destination: Path):
             target = (destination / str(name)).resolve()
             if not target.is_relative_to(destination.resolve()):
                 raise ValueError("Arquivo ZIP tenta escrever fora do cache.")
-        source.extractall(destination)
+        for info in source.infolist():
+            _check_cancel(cancelled)
+            source.extract(info, destination)
 
 
 def _executable(root: Path, backend: str) -> Path:
@@ -91,47 +163,93 @@ def _executable(root: Path, backend: str) -> Path:
     return matches[0]
 
 
-def prepare_models(config, root: Path, progress=None) -> dict:
+def prepare_models(config, root: Path, progress=None, cancelled=None) -> dict:
     report = progress or (lambda message, fraction: None)
-    root = Path(root) / "nemotron-3"
-    root.mkdir(parents=True, exist_ok=True)
+    root = (Path(root) / "nemotron-3").resolve()
+    with _cache_lock(root, cancelled, report):
+        return _prepare_models_locked(config, root, report, cancelled)
+
+
+def prepare_asr_models(config, root: Path, progress=None, cancelled=None) -> None:
+    """Prepare only ASR under the same cross-process guard as manual setup."""
+    root = Path(root).resolve()
+    report = progress or (lambda message, fraction: None)
+    with _cache_lock(root / "nemotron-3", cancelled, report):
+        _prepare_asr(config, root, report, cancelled)
+
+
+def _prepare_models_locked(config, root, report, cancelled):
+    _check_cancel(cancelled)
+    requested = str(getattr(config, "diarization_backend", "auto"))
     try:
-        manifest = _prepared(root)
+        manifest = _prepared(root, cancelled=cancelled)
+    except ProcessingCancelled:
+        raise
     except RuntimeError:
         manifest = None
-    if manifest is not None:
-        _prepare_asr(config, root.parent, report)
+    if manifest is not None and (requested == "cpu" or "vulkan" in manifest["available_runtimes"]):
+        _prepare_asr(config, root.parent, report, cancelled)
         report("Modelos Nemotron 3 já preparados e íntegros.", 1.0)
         return manifest
-    for index, (backend, (name, size, digest)) in enumerate(RUNTIMES.items()):
-        report(f"Baixando runtime NVIDIA {backend} v0.2.0…", index * 0.15)
+    warnings, backends = [], []
+    for index, backend in enumerate(["cpu"] + (["vulkan"] if requested != "cpu" else [])):
+        name, size, digest = RUNTIMES[backend]
         archive = root / name
-        _download(RELEASE + name, archive, size, digest,
-                  lambda fraction: report(f"Baixando runtime {backend}…", index * 0.15 + fraction * 0.15))
-        _extract(archive, root / backend)
-        _executable(root, backend)
+        try:
+            try:
+                _validate_runtime(root, backend, cancelled)
+            except ProcessingCancelled:
+                raise
+            except RuntimeError:
+                report(f"Baixando runtime NVIDIA {backend} v0.2.0…", index * 0.15)
+                _download(RELEASE + name, archive, size, digest,
+                          lambda fraction: report(f"Baixando runtime {backend}…", index * 0.15 + fraction * 0.15),
+                          cancelled=cancelled)
+                destination = root / backend
+                # Only a verified child of this cache may be replaced.
+                if destination.is_symlink() or not destination.resolve().is_relative_to(root):
+                    raise RuntimeError("Diretório de runtime inválido; verifique o cache de modelos.")
+                if destination.exists():
+                    shutil.rmtree(destination)
+                _extract(archive, destination, cancelled)
+                _validate_runtime(root, backend, cancelled)
+            backends.append(backend)
+        except ProcessingCancelled:
+            raise
+        except Exception as exc:
+            if backend == "cpu":
+                raise
+            warning = f"Vulkan opcional indisponível: {exc}; diarização continuará em CPU."
+            warnings.append(warning)
+            report(warning, 0.3)
     report("Baixando modelo Nemotron 3 (107 MB), sem conta ou token…", 0.3)
     _download(f"https://huggingface.co/{MODEL}/resolve/{REVISION}/{MODEL_FILE}", root / MODEL_FILE,
-              MODEL_SIZE, MODEL_SHA, lambda fraction: report("Baixando Nemotron 3…", 0.3 + 0.65 * fraction))
+              MODEL_SIZE, MODEL_SHA, lambda fraction: report("Baixando Nemotron 3…", 0.3 + 0.65 * fraction), cancelled=cancelled)
     # Keep the publisher model card and governing license beside the weights.
-    request = urllib.request.Request(f"https://huggingface.co/{MODEL}/raw/{REVISION}/README.md", headers={"User-Agent": "PACE"})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        (root / "MODEL-README.md").write_bytes(response.read(1024 * 1024))
-    request = urllib.request.Request("https://openmdw.ai/license/1-1/", headers={"User-Agent": "PACE"})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        (root / "LICENSE-OpenMDW-1.1.html").write_bytes(response.read(1024 * 1024))
-    files = {str(path.relative_to(root)): _hash(path) for path in root.rglob("*") if path.is_file()
-             and not path.name.endswith((".zip", ".json"))}
+    for url, name in [(f"https://huggingface.co/{MODEL}/raw/{REVISION}/README.md", "MODEL-README.md"),
+                      ("https://openmdw.ai/license/1-1/", "LICENSE-OpenMDW-1.1.html")]:
+        cached_digest = manifest.get("files", {}).get(name) if manifest else None
+        if not cached_digest or not (root / name).is_file() or _hash(root / name) != cached_digest:
+            _fetch(url, root / name, 1024 * 1024, cancelled=cancelled)
+    files = {MODEL_FILE: MODEL_SHA}
+    for path in [root / "MODEL-README.md", root / "LICENSE-OpenMDW-1.1.html"]:
+        files[str(path.relative_to(root))] = _hash(path)
+    for backend in backends:
+        files.update({str(path.relative_to(root)): _hash(path) for path in (root / backend).rglob("*") if path.is_file()})
     manifest = {"schema": 1, "model": MODEL, "revision": REVISION, "model_license": MODEL_LICENSE,
                 "runtime_version": "0.2.0", "runtime_license": "Apache-2.0", "max_speakers": 8,
-                "model_sha256": MODEL_SHA, "files": files}
+                "model_sha256": MODEL_SHA, "files": files, "runtimes": backends,
+                "preparation_warnings": warnings}
+    _check_cancel(cancelled)
     atomic_json(root / "prepared.json", manifest)
-    _prepare_asr(config, root.parent, report)
+    manifest = _prepared(root, cancelled=cancelled)
+    _prepare_asr(config, root.parent, report, cancelled)
     report("Nemotron 3 preparado. CPU/Vulkan ainda serão validados com áudio real.", 1.0)
     return manifest
 
 
-def _prepare_asr(config, root: Path, report) -> None:
+def _prepare_asr(config, root: Path, report, cancelled=None) -> None:
+    _check_cancel(cancelled)
     provider = str(getattr(config, "transcription_provider", "groq"))
     fallback = str(getattr(config, "meeting_timestamp_provider", "local"))
     needs_local = provider == "local" or (fallback == "local" and (
@@ -142,7 +260,9 @@ def _prepare_asr(config, root: Path, report) -> None:
     marker = root / "asr-prepared.json"
     try:
         existing = json.loads(marker.read_text(encoding="utf-8"))
-        if existing.get("asr_model") == model_name and Path(existing.get("asr_path", "")).is_dir():
+        cached_path = existing.get("asr_path") if isinstance(existing, dict) else None
+        if (isinstance(cached_path, str) and cached_path.strip()
+                and existing.get("asr_model") == model_name and _asr_complete(Path(cached_path))):
             return
     except (OSError, ValueError):
         pass
@@ -151,8 +271,18 @@ def _prepare_asr(config, root: Path, report) -> None:
         path = str(Path(model_name).resolve())
     else:
         from faster_whisper.utils import download_model
-        path = download_model(model_name, cache_dir=str(root / "asr"))
+        path = download_model(model_name, cache_dir=str(root / "asr"), use_auth_token=False)
+    _check_cancel(cancelled)
+    if not _asr_complete(Path(path)):
+        raise RuntimeError("Modelo Whisper local incompleto. Prepare os modelos novamente; se usar uma pasta própria, verifique os arquivos do modelo.")
     atomic_json(marker, {"schema": 1, "asr_model": model_name, "asr_path": path})
+
+
+def _asr_complete(path: Path) -> bool:
+    return (all((path / name).is_file() and (path / name).stat().st_size > 0
+                for name in ("model.bin", "config.json", "tokenizer.json"))
+            and any((path / name).is_file() and (path / name).stat().st_size > 0
+                    for name in ("vocabulary.txt", "vocabulary.json")))
 
 
 def run_cli(command: list[str], directory: Path, *, cancelled=None, progress=None, timeout: float = 180.0,
@@ -247,14 +377,46 @@ def _peak_working_set(process=None) -> int:
     return int(counters.PeakWorkingSetSize)
 
 
-def _prepared(root: Path) -> dict:
+def _validate_runtime(root: Path, backend: str, cancelled=None) -> None:
+    name, size, digest = RUNTIMES[backend]
+    archive = root / name
+    _check_cancel(cancelled)
+    if not archive.is_file() or archive.stat().st_size != size or _hash(archive) != digest:
+        raise RuntimeError(f"Pacote {backend} não corresponde ao checksum oficial; prepare novamente.")
+    allowed = set()
+    try:
+        with zipfile.ZipFile(archive) as source:
+            for info in source.infolist():
+                _check_cancel(cancelled)
+                if info.is_dir():
+                    continue
+                target = (root / backend / info.filename).resolve()
+                expected = hashlib.sha256()
+                with source.open(info) as stream:
+                    for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        _check_cancel(cancelled)
+                        expected.update(block)
+                if not target.is_relative_to((root / backend).resolve()) or not target.is_file() or _hash(target) != expected.hexdigest():
+                    raise RuntimeError(f"Runtime {backend} foi alterado; prepare novamente.")
+                allowed.add(target)
+        if any(path.resolve() not in allowed for path in (root / backend).rglob("*") if path.is_file()):
+            raise RuntimeError(f"Runtime {backend} contém arquivos inesperados; prepare novamente.")
+        _executable(root, backend)
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        raise RuntimeError(f"Runtime {backend} inválido; prepare novamente.") from exc
+
+
+def _prepared(root: Path, cancelled=None) -> dict:
+    _check_cancel(cancelled)
     try:
         manifest = json.loads((root / "prepared.json").read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise RuntimeError("Prepare os modelos Nemotron 3 nas configurações.") from exc
     if (not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict)
             or any(not isinstance(name, str) or not isinstance(digest, str)
-                   for name, digest in manifest["files"].items())):
+                   for name, digest in manifest["files"].items())
+            or not isinstance(manifest.get("preparation_warnings", []), list)
+            or any(not isinstance(message, str) for message in manifest.get("preparation_warnings", []))):
         raise RuntimeError("Cache Nemotron inválido; prepare novamente.")
     if manifest.get("model") != MODEL or manifest.get("model_sha256") != MODEL_SHA or manifest.get("runtime_version") != "0.2.0":
         raise RuntimeError("Cache Nemotron incompatível; prepare novamente.")
@@ -263,26 +425,24 @@ def _prepared(root: Path) -> dict:
         raise RuntimeError("Pesos Nemotron não correspondem ao checksum oficial; prepare novamente.")
     # Manifest JSON is useful provenance, not a trust anchor. Seal executables
     # and DLLs against contents of the officially pinned ZIPs themselves.
-    for backend, (name, size, digest) in RUNTIMES.items():
-        archive = root / name
-        if not archive.is_file() or archive.stat().st_size != size or _hash(archive) != digest:
-            raise RuntimeError(f"Pacote {backend} não corresponde ao checksum oficial; prepare novamente.")
-        with zipfile.ZipFile(archive) as source:
-            for info in source.infolist():
-                if info.is_dir():
-                    continue
-                target = (root / backend / info.filename).resolve()
-                expected = hashlib.sha256()
-                with source.open(info) as stream:
-                    for block in iter(lambda: stream.read(1024 * 1024), b""):
-                        expected.update(block)
-                if not target.is_relative_to(root.resolve()) or not target.is_file() or _hash(target) != expected.hexdigest():
-                    raise RuntimeError(f"Runtime {backend} foi alterado; prepare novamente.")
+    _validate_runtime(root, "cpu", cancelled)
+    available, warnings = ["cpu"], list(manifest.get("preparation_warnings", []))
+    if "vulkan" in RUNTIMES:
+        try:
+            _validate_runtime(root, "vulkan", cancelled)
+            available.append("vulkan")
+        except ProcessingCancelled:
+            raise
+        except RuntimeError as exc:
+            warnings.append(f"Vulkan opcional não preparado ou íntegro: {exc}; usando CPU.")
     for name, expected in manifest["files"].items():
+        _check_cancel(cancelled)
+        if PurePosixPath(name.replace("\\", "/")).parts[0:1] == ("vulkan",):
+            continue  # Optional assets are independently sealed by their ZIP.
         path = (root / name).resolve()
         if not path.is_relative_to(root.resolve()) or not path.is_file() or _hash(path) != expected:
             raise RuntimeError("Cache Nemotron ausente ou alterado; prepare novamente.")
-    return manifest
+    return dict(manifest, available_runtimes=available, preparation_warnings=warnings)
 
 
 def parse_result(payload: str, duration: float) -> list[dict]:
@@ -535,8 +695,15 @@ def diarize(wav: Path, config, directory: Path, progress=None, cancelled=None, *
     from whisper_dictation.media import decode_media, MediaCancelled
 
     report, cancel = progress or (lambda message, fraction: None), cancelled or (lambda: False)
+    _check_cancel(cancel)
     root = model_root(config) / "nemotron-3"
-    manifest = _prepared(root)
+    try:
+        manifest = _prepared(root, cancelled=cancel)
+    except ProcessingCancelled:
+        raise
+    except RuntimeError:
+        report("Preparando automaticamente o identificador de falantes local…", 0.0)
+        manifest = prepare_models(config, root.parent, progress=report, cancelled=cancel)
     directory = Path(directory)
     if cancel():
         raise ProcessingCancelled()
@@ -545,7 +712,7 @@ def diarize(wav: Path, config, directory: Path, progress=None, cancelled=None, *
     maximum = max_speakers if max_speakers is not None else getattr(config, "diarization_max_speakers", 0)
     if any(int(value or 0) > 8 for value in (expected, minimum, maximum)):
         raise ValueError("Nemotron 3 suporta até 8 falantes. Para quantidade superior, selecione Community-1.")
-    warnings = []
+    warnings = list(manifest.get("preparation_warnings", []))
     if expected or minimum or maximum:
         warnings.append("Nemotron estima automaticamente até 8 falantes; quantidade/faixa informada não impõe IDs. Use Community-1 para contagem orientada.")
     requested = str(getattr(config, "diarization_backend", "auto"))
@@ -555,6 +722,7 @@ def diarize(wav: Path, config, directory: Path, progress=None, cancelled=None, *
     identity = _hardware_signature(root)
     fingerprint = hashlib.sha256(json.dumps({"audio": _hash(Path(wav)), "model": MODEL_SHA,
                          "runtimes": RUNTIMES, "preset": "v3-offline", "version": "0.2.0",
+                         "pipeline_revision": 2,
                          "requested": requested, "hardware": identity,
                          "counts": [expected, minimum, maximum]}, sort_keys=True).encode()).hexdigest()
     checkpoint = directory / "nemotron.result.json"
@@ -597,7 +765,7 @@ def diarize(wav: Path, config, directory: Path, progress=None, cancelled=None, *
             cached = {}
     except (OSError, ValueError):
         pass
-    if requested != "cpu":
+    if requested != "cpu" and "vulkan" in manifest.get("available_runtimes", []):
         try:
             doctor_output, _ = run_cli([str(_executable(root, "vulkan")), "doctor", "--json"], directory / "nemotron-devices",
                                        cancelled=cancel, timeout=60)
@@ -648,6 +816,8 @@ def diarize(wav: Path, config, directory: Path, progress=None, cancelled=None, *
     report(f"Identificando falantes em {device}…", 0.1)
     try:
         turns, elapsed, device_log = _infer(root, normalized, duration, directory / "nemotron-inference", device, cancel, report, timeout)
+        if not turns and any(cpu_turns):
+            raise RuntimeError("Diarizador não retornou falantes apesar de detectar vozes na validação; tente processar novamente.")
     except ProcessingCancelled:
         raise
     except Exception as exc:
@@ -657,6 +827,8 @@ def diarize(wav: Path, config, directory: Path, progress=None, cancelled=None, *
         device = "cpu"
         timeout = max(180.0, min(7200.0, duration / probe_duration * cpu_time * 5 + 120))
         turns, elapsed, device_log = _infer(root, normalized, duration, directory / "nemotron-inference-cpu", device, cancel, report, timeout)
+    if not turns and any(cpu_turns):
+        raise RuntimeError("Diarizador CPU não retornou falantes apesar de detectar vozes na validação; tente processar novamente.")
     if cancel():
         raise ProcessingCancelled()
     result = {"turns": turns, "exclusive_turns": exclusive_turns(turns), "backend": "nemotron-" + device,

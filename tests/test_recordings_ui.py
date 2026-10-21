@@ -100,6 +100,79 @@ class RecordingsUITests(unittest.TestCase):
         self.assertEqual(self.store.get(row["id"])["status"], "queued")
         self.assertFalse((self.store.directory(row["id"]) / "cancel.request").exists())
 
+    def test_model_preparation_stage_remains_visible_over_transcription_warning(self):
+        row = self.window.row()
+        warning = "A transcrição parcial ainda não contém todos os falantes."
+        for status in ("processing", "diarizing", "preparing"):
+            self.store.update(row["id"], status=status, stage="  Preparando\n modelos\tNemotron  ",
+                              progress=.42, transcription_warning=warning)
+            self.window.refresh_detail()
+            self.assertEqual(self.window.notice.cget("text"), "Preparando modelos Nemotron · 42%")
+            self.assertEqual(self.window.copy_button.cget("state"), "normal")
+        self.store.update(row["id"], status="ready", stage="Concluído", progress=1)
+        self.window.refresh_detail()
+        self.assertEqual(self.window.notice.cget("text"), warning)
+
+    def test_processing_stage_is_bounded_with_status_fallback_and_available_in_details(self):
+        row = self.window.row()
+        self.store.update(row["id"], status="processing", stage=" \n\t ", progress=.2)
+        self.window.refresh_detail()
+        self.assertEqual(self.window.notice.cget("text"), "Preparando · 20%")
+        stage = "Baixando modelos Nemotron e verificando arquivos. " * 30
+        self.store.update(row["id"], stage=stage, progress=.35)
+        self.window.refresh_detail()
+        notice = self.window.notice.cget("text")
+        self.assertTrue(notice.startswith("Baixando modelos Nemotron"))
+        self.assertTrue(notice.endswith("… · 35%"))
+        self.assertLessEqual(len(notice), 160)
+        with patch("whisper_dictation.recordings_window.messagebox.showinfo") as info:
+            self.window.processing_details()
+        self.assertIn(stage, info.call_args.args[1])
+
+    def test_recording_and_audio_errors_take_priority_over_busy_stage_and_transcription_warning(self):
+        row = self.window.row()
+        self.store.update(row["id"], status="processing", stage="Preparando modelos Nemotron", progress=.6,
+                          error="Falha ao preparar o modelo.", transcription_warning="Aviso da transcrição parcial.")
+        self.window.refresh_detail()
+        self.assertEqual(self.window.notice.cget("text"), "Falha ao preparar o modelo.")
+        self.window.player.close()
+        with patch.object(self.window.player, "load", side_effect=OSError("áudio sintético indisponível")):
+            self.window.refresh_detail()
+        self.assertEqual(self.window.notice.cget("text"), "Não foi possível abrir o áudio: áudio sintético indisponível")
+
+    def test_failed_recording_retry_preserves_partial_transcript_audio_and_copy_access(self):
+        row = self.window.row()
+        folder = self.store.directory(row["id"])
+        audio = folder / "audio.wav"
+        partial = folder / "transcript.partial.json"
+        partial.write_text(json.dumps({"partial": True, "segments": [
+            {"start": 0, "end": .1, "speaker": None, "text": "Trecho parcial preservado."}
+        ]}), encoding="utf-8")
+        self.store.update(row["id"], status="failed", stage="Falha", error="Nemotron não preparado.",
+                          result_path=None, partial_result_path=str(partial))
+        audio_before, partial_before = audio.read_bytes(), partial.read_bytes()
+        self.window.refresh_detail()
+        self.assertIn("Trecho parcial preservado.", self.window.text.get("1.0", "end"))
+        self.assertEqual(self.window.copy_button.cget("state"), "normal")
+        self.assertEqual(self.window.seek.cget("state"), "normal")
+        with patch.object(self.window.root, "clipboard_clear"), patch.object(self.window.root, "clipboard_append") as copy:
+            self.window.copy()
+        self.assertIn("Trecho parcial preservado.", copy.call_args.args[0])
+        (folder / "cancel.request").touch()
+        self.window.retry()
+        self.window.refresh_detail()
+        updated = self.store.get(row["id"])
+        self.assertEqual(updated["status"], "queued")
+        self.assertEqual(updated["stage"], "Na fila")
+        self.assertEqual(updated["error"], "")
+        self.assertEqual(updated["partial_result_path"], str(partial))
+        self.assertFalse((folder / "cancel.request").exists())
+        self.assertEqual(audio.read_bytes(), audio_before)
+        self.assertEqual(partial.read_bytes(), partial_before)
+        self.assertIn("Trecho parcial preservado.", self.window.text.get("1.0", "end"))
+        self.window.retry()
+        self.assertEqual(self.store.get(row["id"]), updated)
+
     def test_menu_opens_and_export_commands_are_dispatched(self):
         self.window.root.deiconify()
         self.window.root.update()

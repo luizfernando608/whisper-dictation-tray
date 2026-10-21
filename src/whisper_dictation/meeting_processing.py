@@ -154,19 +154,36 @@ def _effective_provider(config) -> tuple[str, str, str]:
 
 
 def _transcribe_chunk(path: Path, duration: float, config, provider: str, model_name: str,
-                      clients: dict, root: Path) -> dict:
+                      clients: dict, root: Path, *, preparation_progress=None, cancelled=None) -> dict:
     language = config.language if config.language not in {"", "auto"} else None
     if provider == "local":
         if "local" not in clients:
             from faster_whisper import WhisperModel
-            try:
+            def read_prepared():
                 asr_manifest = root / "asr-prepared.json"
                 if not asr_manifest.exists():
                     asr_manifest = root / "prepared.json"
-                prepared = json.loads(asr_manifest.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                raise RuntimeError("Prepare os modelos locais em Configurações antes de transcrever.") from exc
-            if prepared.get("asr_model") != model_name or not prepared.get("asr_path"):
+                try:
+                    prepared = json.loads(asr_manifest.read_text(encoding="utf-8"))
+                    return prepared if isinstance(prepared, dict) else {}
+                except (OSError, ValueError):
+                    return {}
+            def usable(prepared):
+                if (prepared.get("asr_model") != model_name or not isinstance(prepared.get("asr_path"), str)
+                        or not prepared["asr_path"].strip()):
+                    return False
+                assets = Path(prepared["asr_path"])
+                return (all((assets / name).is_file() and (assets / name).stat().st_size > 0
+                            for name in ("model.bin", "config.json", "tokenizer.json"))
+                        and any((assets / name).is_file() and (assets / name).stat().st_size > 0
+                                for name in ("vocabulary.txt", "vocabulary.json")))
+            prepared = read_prepared()
+            if (not usable(prepared) and getattr(config, "diarization_engine", "nemotron") == "nemotron"
+                    and model_name == config.model_size):
+                from whisper_dictation.nemotron_diarization import prepare_asr_models
+                prepare_asr_models(config, root, preparation_progress, cancelled)
+                prepared = read_prepared()
+            if not usable(prepared):
                 raise RuntimeError("O modelo Whisper selecionado ainda não foi preparado. Use Preparar modelos.")
             clients["local"] = WhisperModel(
                 prepared["asr_path"], device="cpu", compute_type=config.compute_type,
@@ -289,7 +306,7 @@ def _validate_transcript(transcript: dict, duration: float) -> None:
 
 
 def transcribe_recording(audio: Path, directory: Path, config, cancellation: _FileCancellation,
-                         progress=None, *, partial_callback=None, speech_only=False) -> dict:
+                         progress=None, *, partial_callback=None, speech_only=False, preparation_progress=None) -> dict:
     provider, model_name, warning = _effective_provider(config)
     signature = {"schema": 1, "audio_sha256": _hash(audio),
                  "provider": provider, "model": model_name, "language": config.language,
@@ -299,6 +316,7 @@ def transcribe_recording(audio: Path, directory: Path, config, cancellation: _Fi
     fingerprint = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()
     directory.mkdir(exist_ok=True)
     clients, collected = {}, []
+    setup_options = {"preparation_progress": preparation_progress, "cancelled": cancellation.is_set} if provider == "local" else {}
     language, total_duration = config.language, 0.0
 
     def restore_raw(saved, length):
@@ -343,7 +361,7 @@ def transcribe_recording(audio: Path, directory: Path, config, cancellation: _Fi
                         packed_duration = float(packed["duration"])
                         if packed_duration > 0:
                             raw = _transcribe_chunk(Path(packed["audio"]), packed_duration, config, provider,
-                                                    model_name, clients, model_root(config))
+                                                    model_name, clients, model_root(config), **setup_options)
                         else:
                             raw = {"text": "", "segments": [], "language": language}
                         saved.update(transcript=raw, speech_map=packed["chunks"], packed_duration=packed_duration)
@@ -351,7 +369,7 @@ def transcribe_recording(audio: Path, directory: Path, config, cancellation: _Fi
                         destination.unlink(missing_ok=True)
                 else:
                     saved["transcript"] = _transcribe_chunk(path, length, config, provider, model_name,
-                                                             clients, model_root(config))
+                                                             clients, model_root(config), **setup_options)
                 atomic_json(raw_checkpoint, saved)
                 partial = restore_raw(saved, length)
                 _validate_transcript(partial, length)
@@ -442,6 +460,7 @@ def _process_sources(prepared: dict, directory: Path, record: dict, config, canc
             Path(sources[name]), source_directory / "transcription-checkpoints", config, cancellation,
             transcript_progress, partial_callback=lambda partial: save_partial(name, partial),
             speech_only=name == "microphone",
+            preparation_progress=lambda stage, fraction: update_progress(base, f"{stage} · {label}"),
         )
         cancellation.check()
         transcripts[name] = transcript
@@ -578,7 +597,8 @@ def process_recording(store_root, recording_id: str, config_path) -> dict | None
             store.update(recording_id, progress=min(0.65, 0.65 * seconds / max(seconds, duration)),
                          stage="Transcrevendo", partial_result_path=str(directory / "transcript.partial.json"))
         transcript = transcribe_recording(audio, directory / "transcription-checkpoints", config,
-                                         cancellation, transcript_progress)
+                                         cancellation, transcript_progress,
+                                         preparation_progress=lambda stage, fraction: store.update(recording_id, stage=stage))
         if source_warning:
             transcript["warning"] = "; ".join(filter(None, (transcript.get("warning", ""), source_warning)))
         cancellation.check()

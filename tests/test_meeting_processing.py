@@ -124,17 +124,53 @@ class MeetingProcessingTests(unittest.TestCase):
         from unittest.mock import Mock
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "asr-prepared.json").write_text(json.dumps({"asr_model": "small", "asr_path": "local-whisper"}), encoding="utf-8")
+            assets = root / "local-whisper"
+            assets.mkdir()
+            for name in ("model.bin", "config.json", "tokenizer.json", "vocabulary.txt"):
+                (assets / name).write_bytes(b"fixture")
+            (root / "asr-prepared.json").write_text(json.dumps({"asr_model": "small", "asr_path": str(assets)}), encoding="utf-8")
             model = Mock()
             model.transcribe.return_value = ([], SimpleNamespace(language="pt"))
             with patch("faster_whisper.WhisperModel", return_value=model) as load:
                 result = module._transcribe_chunk(root / "audio.wav", 1, AppConfig(), "local", "small", {}, root)
             self.assertEqual(result["language"], "pt")
             load.assert_called_once()
-            self.assertEqual(load.call_args.args[0], "local-whisper")
+            self.assertEqual(load.call_args.args[0], str(assets))
             self.assertTrue(load.call_args.kwargs["local_files_only"])
             with self.assertRaisesRegex(RuntimeError, "ainda não foi preparado"):
                 module._transcribe_chunk(root / "audio.wav", 1, AppConfig(), "local", "medium", {}, root)
+
+    def test_local_asr_prepares_missing_and_incomplete_cache_without_account(self):
+        from whisper_dictation import nemotron_diarization
+        for cache_state in ("missing", "incomplete", "invalid_path"):
+            with self.subTest(cache_state=cache_state), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                assets = root / "whisper"
+                assets.mkdir()
+                if cache_state != "missing":
+                    module.atomic_json(root / "asr-prepared.json", {"asr_model": "tiny",
+                                       "asr_path": str(assets) if cache_state == "incomplete" else None})
+                config = AppConfig(transcription_provider="local", model_size="tiny")
+                model = Mock()
+                model.transcribe.return_value = ([], SimpleNamespace(language="pt"))
+                stages = []
+                def setup(config, cache, progress=None, cancelled=None):
+                    self.assertEqual(cache, root)
+                    self.assertFalse(cancelled())
+                    progress("Preparando Whisper tiny", .5)
+                    for name in ("model.bin", "config.json", "tokenizer.json", "vocabulary.txt"):
+                        (assets / name).write_bytes(b"fixture")
+                    module.atomic_json(root / "asr-prepared.json", {"asr_model": "tiny", "asr_path": str(assets)})
+                with patch.object(nemotron_diarization, "prepare_asr_models", side_effect=setup, create=True) as prepare, \
+                        patch("faster_whisper.WhisperModel", return_value=model) as load:
+                    result = module._transcribe_chunk(root / "audio.wav", 1, config, "local", "tiny", {}, root,
+                                                     preparation_progress=lambda message, fraction: stages.append(message),
+                                                     cancelled=lambda: False)
+                prepare.assert_called_once()
+                self.assertEqual(load.call_args.args[0], str(assets))
+                self.assertTrue(load.call_args.kwargs["local_files_only"])
+                self.assertEqual(result["language"], "pt")
+                self.assertIn("Preparando Whisper tiny", stages)
 
     def test_merge_preserves_gaps_and_ambiguous_overlapping_voices(self):
         transcript = {"segments": [{"start": 0, "end": 6, "text": "a b c d",
