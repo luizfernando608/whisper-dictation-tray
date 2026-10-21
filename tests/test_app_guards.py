@@ -100,6 +100,21 @@ class AppGuardTests(unittest.TestCase):
         restart.assert_not_called()
         self.assertFalse(app._restarting)
 
+    def test_helper_bootstrap_failure_never_shuts_down_the_application(self):
+        app = self.app()
+        app._ui_lock = threading.Lock()
+        app._recordings_proc = None
+        app._meeting_overlay_proc = None
+        app._shutdown_app = Mock()
+        update = updater.UpdateInfo("9.1.0", "v9.1.0", "new")
+        with patch("whisper_dictation.app.updater.restart_to_update", side_effect=updater.UpdateError("helper not ready")) as restart:
+            app._run_update(update)
+        restart.assert_called_once_with(update, app.project_root)
+        app._shutdown_app.assert_not_called()
+        self.assertFalse(app._restarting)
+        self.assertFalse(app._shutdown.is_set())
+        self.assertIn("helper not ready", app._notify.call_args.args[1])
+
     def test_confirmation_only_runs_in_ready_tray_callback(self):
         app = self.app()
         with patch("whisper_dictation.app.updater.confirm_running_version") as confirm:

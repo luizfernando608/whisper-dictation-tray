@@ -2,15 +2,20 @@
 from __future__ import annotations
 
 import hashlib
+import errno
+import http.client
 import json
 import logging
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
 import threading
+import time
+import urllib.error
 import urllib.request
 import uuid
 from dataclasses import dataclass
@@ -29,6 +34,10 @@ _download_lock = threading.Lock()
 
 class UpdateError(RuntimeError):
     """Release check, preparation or application failed."""
+
+
+class _InstallerIntegrityError(UpdateError):
+    """An official download may be retried, but its current bytes cannot run."""
 
 
 @dataclass(frozen=True)
@@ -50,6 +59,30 @@ def update_cache_root() -> Path:
     return local / "PaceData" / "updates"
 
 
+def _filesystem_path(path: Path | str) -> str:
+    """Use only for file I/O after checking logical containment/reparse points.
+
+    Extended Win32 paths do not require changing LongPathsEnabled. Keep these
+    aliases out of plans, receipts, subprocess arguments and containment checks.
+    """
+    absolute = os.path.abspath(path)
+    if os.name != "nt" or absolute.startswith("\\\\?\\"):
+        return absolute
+    if absolute.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + absolute[2:]
+    return "\\\\?\\" + absolute
+
+
+def _logical_path(path: Path | str) -> Path:
+    value = os.fspath(path)
+    if os.name == "nt":
+        if value.lower().startswith("\\\\?\\unc\\"):
+            value = "\\\\" + value[8:]
+        elif value.startswith("\\\\?\\"):
+            value = value[4:]
+    return Path(value)
+
+
 def _remove_cached_path(path: Path, cache: Path) -> bool:
     """Prune only resolved cache descendants, refusing links into other folders."""
     cache, path = cache.resolve(), Path(path)
@@ -59,12 +92,15 @@ def _remove_cached_path(path: Path, cache: Path) -> bool:
         return False
     try:
         if path.is_dir():
-            for directory, children, files in os.walk(path, followlinks=False):
+            def fail_scan(error):
+                raise error
+            for directory, children, files in os.walk(_filesystem_path(path), followlinks=False, onerror=fail_scan):
                 for name in children + files:
                     child = Path(directory) / name
-                    if child.is_symlink() or getattr(child, "is_junction", lambda: False)() or not child.resolve().is_relative_to(cache):
+                    logical = _logical_path(child.resolve())
+                    if child.is_symlink() or getattr(child, "is_junction", lambda: False)() or not logical.is_relative_to(cache):
                         return False
-            shutil.rmtree(path)
+            shutil.rmtree(_filesystem_path(path))
         elif path.exists():
             path.unlink()
         return True
@@ -176,13 +212,48 @@ def check_for_update(timeout: float = 10.0) -> UpdateInfo | None:
 
 def validate_installer(path: Path, sha256: str, size: int) -> None:
     if path.stat().st_size != size:
-        raise UpdateError("O instalador está incompleto ou tem tamanho diferente do publicado.")
+        raise _InstallerIntegrityError("O instalador está incompleto ou tem tamanho diferente do publicado.")
     digest = hashlib.sha256()
     with path.open("rb") as source:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     if digest.hexdigest() != sha256.lower():
-        raise UpdateError("A verificação SHA256 do instalador falhou; o pacote não será executado.")
+        raise _InstallerIntegrityError("A verificação SHA256 do instalador falhou; o pacote não será executado.")
+
+
+def _retryable_download_error(error: Exception) -> bool:
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in {408, 425, 429, 500, 502, 503, 504}
+    if isinstance(error, urllib.error.URLError):
+        return not isinstance(error.reason, ssl.SSLCertVerificationError)
+    if isinstance(error, (_InstallerIntegrityError, http.client.IncompleteRead,
+                          ConnectionError, TimeoutError, ssl.SSLEOFError)):
+        return True
+    return isinstance(error, OSError) and error.errno in {
+        errno.ECONNRESET, errno.ECONNABORTED, errno.ENETRESET, errno.ENETUNREACH,
+        errno.EHOSTUNREACH, errno.ETIMEDOUT,
+    }
+
+
+def _download_once(update: UpdateInfo, destination: Path, timeout: float) -> None:
+    descriptor, partial_name = tempfile.mkstemp(prefix="Pace-", suffix=".partial", dir=destination.parent)
+    partial = Path(partial_name)
+    try:
+        request = urllib.request.Request(update.installer_url, headers={"User-Agent": "PACE-App"})
+        with os.fdopen(descriptor, "wb") as output:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                received = 0
+                while chunk := response.read(65536):
+                    received += len(chunk)
+                    if received > update.size:
+                        raise _InstallerIntegrityError("O download excedeu o tamanho publicado do instalador.")
+                    output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        validate_installer(partial, update.sha256, update.size)
+        partial.replace(destination)
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 def download_installer(update: UpdateInfo, dest_dir: str | None = None, timeout: float = 120.0) -> str:
@@ -198,28 +269,20 @@ def download_installer(update: UpdateInfo, dest_dir: str | None = None, timeout:
                 return str(destination)
             except UpdateError:
                 _logger.warning("Pacote em cache inválido; baixando novamente.")
-        descriptor, partial_name = tempfile.mkstemp(prefix="Pace-", suffix=".partial", dir=directory)
-        partial = Path(partial_name)
-        try:
-            request = urllib.request.Request(update.installer_url, headers={"User-Agent": "PACE-App"})
-            with os.fdopen(descriptor, "wb") as output:
-                with urllib.request.urlopen(request, timeout=timeout) as response:
-                    received = 0
-                    while chunk := response.read(65536):
-                        received += len(chunk)
-                        if received > update.size:
-                            raise UpdateError("O download excedeu o tamanho publicado do instalador.")
-                        output.write(chunk)
-                output.flush()
-                os.fsync(output.fileno())
-            validate_installer(partial, update.sha256, update.size)
-            partial.replace(destination)
-        except Exception as exc:
-            if isinstance(exc, UpdateError):
-                raise
-            raise UpdateError("Não foi possível baixar a atualização; o aplicativo continua disponível.") from exc
-        finally:
-            partial.unlink(missing_ok=True)
+        for attempt in range(3):
+            try:
+                _download_once(update, destination, timeout)
+                break
+            except Exception as exc:
+                if isinstance(exc, urllib.error.HTTPError):
+                    exc.close()
+                if attempt < 2 and _retryable_download_error(exc):
+                    _logger.warning("Download não validado; repetindo tentativa %s de 3 (%s).", attempt + 2, type(exc).__name__)
+                    time.sleep(0.25 * (attempt + 1))
+                    continue
+                if isinstance(exc, UpdateError):
+                    raise
+                raise UpdateError("Não foi possível baixar a atualização; o aplicativo continua disponível.") from exc
     return str(destination)
 
 
@@ -237,6 +300,39 @@ def hidden_process_options() -> dict:
         startup.wShowWindow = 0
         options["startupinfo"] = startup
     return options
+
+
+def _wait_helper_ready(process: subprocess.Popen, plan: dict, staging: Path, timeout: float = 30.0) -> None:
+    """Verify a receipt from this owned helper before allowing the caller to exit."""
+    ready = staging / "ready.json"
+    expected = {"version": plan["version"], "target": str(Path(plan["target"]).resolve()),
+                "parent_pid": plan["parent_pid"], "token": plan["token"], "helper_pid": process.pid}
+    deadline = time.monotonic() + timeout
+    try:
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise UpdateError("O auxiliar de atualização encerrou antes de confirmar prontidão. O PACE continua aberto.")
+            if ready.exists():
+                if ready.is_symlink() or ready.resolve().parent != staging.resolve():
+                    raise UpdateError("Confirmação de prontidão fora do diretório de atualização.")
+                try:
+                    receipt = json.loads(ready.read_text(encoding="utf-8"))
+                except (OSError, ValueError) as exc:
+                    raise UpdateError("O auxiliar retornou uma confirmação de prontidão inválida.") from exc
+                if receipt != expected or process.poll() is not None:
+                    raise UpdateError("A confirmação de prontidão não corresponde ao auxiliar iniciado.")
+                return
+            time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+        raise UpdateError("O auxiliar não confirmou prontidão a tempo. O PACE continua aberto.")
+    except Exception:
+        if process.poll() is None:
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        raise
 
 
 def restart_to_update(update: UpdateInfo, project_root: Path) -> int:
@@ -267,15 +363,18 @@ def restart_to_update(update: UpdateInfo, project_root: Path) -> int:
         internal = target / "_internal"
         if internal.is_symlink() or getattr(internal, "is_junction", lambda: False)():
             raise UpdateError("O runtime do PACE deve estar dentro da pasta de instalação.")
-        shutil.copy2(executable, helper)
-        shutil.copytree(internal, runtime / "_internal")
+        shutil.copy2(_filesystem_path(executable), _filesystem_path(helper))
+        shutil.copytree(_filesystem_path(internal), _filesystem_path(runtime / "_internal"))
         command = [str(helper), "--apply-update", "--update-plan", str(plan_path)]
     else:
         main = Path(__file__).resolve().parents[2] / "main.py"
         command = [sys.executable, str(main), "--apply-update", "--update-plan", str(plan_path)]
     environment = os.environ.copy()
     environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
-    process = subprocess.Popen(command, cwd=staging, env=environment, **hidden_process_options())
+    with (staging / "bootstrap.log").open("ab") as bootstrap:
+        process = subprocess.Popen(command, cwd=staging, env=environment,
+            stdout=bootstrap, stderr=subprocess.STDOUT, **hidden_process_options())
+    _wait_helper_ready(process, plan, staging)
     return process.pid
 
 

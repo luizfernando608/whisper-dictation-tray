@@ -13,7 +13,7 @@ from ctypes import wintypes
 from pathlib import Path
 
 from whisper_dictation.updater import (
-    UpdateError, _parse_version, hidden_process_options, update_cache_root, validate_installer,
+    UpdateError, _filesystem_path, _parse_version, hidden_process_options, update_cache_root, validate_installer,
 )
 from whisper_dictation.update_integration import snapshot_integration, restore_integration
 
@@ -73,12 +73,12 @@ def _read_plan(path: Path) -> dict:
 
 def _snapshot(target: Path, backup: Path) -> None:
     backup.mkdir()
-    shutil.copy2(target / "Pace.exe", backup / "Pace.exe")
+    shutil.copy2(_filesystem_path(target / "Pace.exe"), _filesystem_path(backup / "Pace.exe"))
     internal = target / "_internal"
     if internal.exists():
         if internal.is_symlink() or getattr(internal, "is_junction", lambda: False)():
             raise UpdateError("Runtime externo não pode ser substituído por este atualizador.")
-        shutil.copytree(internal, backup / "_internal")
+        shutil.copytree(_filesystem_path(internal), _filesystem_path(backup / "_internal"))
 
 
 def _restore(target: Path, backup: Path) -> None:
@@ -89,13 +89,13 @@ def _restore(target: Path, backup: Path) -> None:
         if current.is_symlink() or getattr(current, "is_junction", lambda: False)():
             raise UpdateError("Rollback interrompido: binário aponta para um caminho externo.")
         if current.is_dir():
-            shutil.rmtree(current)
+            shutil.rmtree(_filesystem_path(current))
         elif current.exists():
             current.unlink()
         if saved.is_dir():
-            shutil.copytree(saved, current)
+            shutil.copytree(_filesystem_path(saved), _filesystem_path(current))
         elif saved.exists():
-            shutil.copy2(saved, current)
+            shutil.copy2(_filesystem_path(saved), _filesystem_path(current))
 
 
 def _launch(target: Path, plan: dict | None = None) -> subprocess.Popen:
@@ -137,6 +137,16 @@ def _write_result(staging: Path, result: dict) -> None:
         _logger.exception("Não foi possível persistir o resultado da atualização.")
 
 
+def _write_ready(staging: Path, plan: dict) -> None:
+    temporary = staging / "ready.partial"
+    with temporary.open("w", encoding="utf-8") as output:
+        json.dump({"version": plan["version"], "target": str(Path(plan["target"]).resolve()),
+                   "parent_pid": plan["parent_pid"], "token": plan["token"], "helper_pid": os.getpid()}, output)
+        output.flush()
+        os.fsync(output.fileno())
+    temporary.replace(staging / "ready.json")
+
+
 def apply_update(plan_path: Path) -> int:
     """Install after graceful exit; restore binaries on installer/start failure."""
     plan = _read_plan(plan_path)
@@ -152,6 +162,7 @@ def apply_update(plan_path: Path) -> int:
     parent_exited = False
     try:
         validate_installer(Path(plan["installer"]), plan["sha256"], plan["size"])
+        _write_ready(staging, plan)
         wait_for_process_exit(int(plan["parent_pid"]))
         parent_exited = True
         _snapshot(target, backup)
