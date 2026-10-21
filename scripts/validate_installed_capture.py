@@ -41,6 +41,93 @@ def read_json(path: Path) -> dict:
         return {}
 
 
+class RuntimeSchemaError(ValueError):
+    """A readable runtime file is not a complete, usable telemetry snapshot."""
+
+
+def read_runtime(path: Path) -> dict:
+    state = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(state, dict):
+        raise RuntimeSchemaError("Runtime snapshot must be an object.")
+    for name in ("active", "paused", "finalizing"):
+        if type(state.get(name)) is not bool:
+            raise RuntimeSchemaError(f"Runtime {name} must be a boolean.")
+    for name in ("duration", "updated_at"):
+        value = state.get(name)
+        if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+            raise RuntimeSchemaError(f"Runtime {name} must be finite and nonnegative.")
+    levels = state.get("levels")
+    if not isinstance(levels, list) or len(levels) != 2 or any(
+        type(value) not in (int, float) or not math.isfinite(value) or value < 0 for value in levels
+    ):
+        raise RuntimeSchemaError("Runtime levels must contain two finite, nonnegative numbers.")
+    if "recording_id" not in state:
+        raise RuntimeSchemaError("Runtime recording_id is missing.")
+    identifier = state["recording_id"]
+    if identifier is not None and (not isinstance(identifier, str) or not identifier):
+        raise RuntimeSchemaError("Runtime recording_id must be a nonempty string or null.")
+    if state["active"] and identifier is None:
+        raise RuntimeSchemaError("Active runtime must identify the recording.")
+    # Keep only telemetry, never arbitrary additional payload in the report.
+    return {name: state[name] for name in (
+        "active", "paused", "finalizing", "duration", "updated_at", "levels", "recording_id"
+    )}
+
+
+class CaptureRuntime:
+    """Retry unavailable telemetry briefly; never retry an observed stopped capture."""
+
+    def __init__(self, path: Path, identifier: str, report: dict, save, *, timeout=2.0):
+        self.path, self.identifier, self.save = path, identifier, save
+        self.timeout = min(2.0, max(0.0, timeout))
+        self.started = time.monotonic()
+        self.diagnostics = report["capture_runtime"] = {"attempts": 0, "read_errors": []}
+
+    def read(self) -> dict:
+        deadline = time.monotonic() + self.timeout
+        retry_attempt = 0
+        while True:
+            retry_attempt += 1
+            self.diagnostics["attempts"] += 1
+            observation = {"attempt": self.diagnostics["attempts"], "retry_attempt": retry_attempt,
+                           "at_utc": datetime.now(timezone.utc).isoformat(),
+                           "elapsed_seconds": round(time.monotonic() - self.started, 6)}
+            try:
+                state = read_runtime(self.path)
+            except (OSError, ValueError) as exc:
+                observation.update(error_type=type(exc).__name__, error=str(exc))
+                for field in ("errno", "winerror"):
+                    if getattr(exc, field, None) is not None:
+                        observation[field] = getattr(exc, field)
+                self.diagnostics["read_errors"].append(observation)
+                self.save()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.diagnostics["failure"] = "runtime_unavailable"
+                    self.save()
+                    raise TimeoutError("Capture telemetry unavailable for up to two seconds; capture state unknown.") from exc
+                time.sleep(min(.1, remaining))
+                continue
+            observation["state"] = state
+            self.diagnostics["last_valid"] = observation
+            if not state["active"] or state["recording_id"] != self.identifier:
+                self.diagnostics["failure"] = "valid_inactive_or_wrong_recording"
+                self.diagnostics["failure_snapshot"] = observation
+                self.save()  # Preserve the observed state before finally stops the app.
+                raise AssertionError("Installed meeting stopped or changed recording before the requested duration.")
+            return state
+
+    def wait_paused(self, paused: bool, *, timeout=30) -> dict:
+        deadline = time.monotonic() + timeout
+        while True:
+            state = self.read()
+            if state["paused"] is paused:
+                return state
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Capture did not enter the requested pause state.")
+            time.sleep(.1)
+
+
 def assert_preview_idle(preview: Path) -> None:
     config = read_json(preview / "config.json")
     if not config:
@@ -241,14 +328,13 @@ def main() -> int:
         identifier = state["recording_id"]
         report["recording_id"] = identifier
         report["library"] = str(store_root)
+        runtime = CaptureRuntime(runtime_path, identifier, report, save)
         playback.begin()
         wall_started = time.monotonic()
         next_progress, did_pause, continued_after_120 = 0.0, False, False
         peak_levels = [0.0, 0.0]
         while True:
-            state = read_json(runtime_path)
-            if not state.get("active") or state.get("recording_id") != identifier:
-                raise AssertionError("Installed meeting stopped before the requested duration.")
+            state = runtime.read()
             duration = float(state["duration"])
             for index, value in enumerate(state.get("levels", [0, 0])):
                 peak_levels[index] = max(peak_levels[index], float(value))
@@ -262,16 +348,16 @@ def main() -> int:
             if duration >= 25 and not did_pause:
                 if not send_command(MEETING_PAUSE):
                     raise RuntimeError("Could not send pause IPC.")
-                paused = wait_for(lambda: (s if (s := read_json(runtime_path)).get("paused") else None), description="pause")
+                paused = runtime.wait_paused(True)
                 before = float(paused["duration"])
                 time.sleep(4)
-                held = read_json(runtime_path)
+                held = runtime.read()
                 delta = abs(float(held["duration"]) - before)
                 if not held.get("paused") or not held.get("active") or delta > .1:
                     raise AssertionError("Capture duration advanced while paused.")
                 if not send_command(MEETING_PAUSE):
                     raise RuntimeError("Could not send resume IPC.")
-                wait_for(lambda: (s if (s := read_json(runtime_path)).get("active") and not s.get("paused") else None), description="resume")
+                runtime.wait_paused(False)
                 playback.begin()
                 report["checks"].append({"name": "pause_resume", "status": "passed", "pause_seconds": 4, "duration_drift": delta})
                 progress("capture_resumed")
