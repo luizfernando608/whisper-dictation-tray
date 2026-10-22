@@ -2,7 +2,9 @@
 
 ## Estado
 
-Correção de produção no commit `d83465f`, versão 1.5.2. Revisão independente aprovada para código/pipeline/UI e gates da fonte, congelado e primeiro uso instalado. Instalação/upgrade/restauração do host aprovados. A release pública continua 1.5.1 até a publicação da correção.
+Correção de produção no commit `d83465f`, versão 1.5.2. Revisão independente aprovada para código/pipeline/UI e gates da fonte, congelado e primeiro uso instalado. Instalação/upgrade/restauração do host aprovados. Release pública 1.5.2 publicada e download conferido; ensaio real pelo botão público 1.5.1 → 1.5.2 aprovado. Detalhes em [publication-2026-10-21.md](publication-2026-10-21.md).
+
+Ativação local 1.5.2 também aprovada e revisão independente final sem bloqueios: cinco atalhos, abertura pelo menu Iniciar, janela única, registro intacto e hashes dos 20 WAVs/config/env preservados. Todos os itens T1–T6 concluídos; a reunião remota precisa de retry pelo usuário após atualizar.
 
 ## Incidente e reprodução
 
@@ -46,7 +48,7 @@ Instalador 1.5.2 concluído, 327.415.822 bytes, SHA256 `b0573e13d606c835e0be6b75
 
 `C:/Users/ziull/Documents/pace-speaker-fresh-installed-20261021/Perfil João/report.json`: aprovado usando o EXE da instalação limpa, com outro cache/HF_HOME inicialmente inexistentes. Primeiro uso CPU com downloads: 35,907 s; segunda gravação independente offline solicitando auto: 14,703 s. Ambas com 18 segmentos, 25 turnos e três falantes em CPU, sem Vulkan e sem preparo manual. O teste não abre microfones nem usa gravações privadas.
 
-`C:/Users/ziull/Documents/pace-speaker-152-install-20261021/report-install.json`: aprovado, processo exit0 e cleanup_errors vazio. Instalou o pacote limpo; instalou a baseline pública 1.5.1 real; aguardou o pai antigo e aplicou 1.5.2 via helper candidato congelado. Receipt/versão/canários/limite indefinido conferidos. Nesse gate, pacote e helper novos são semeados pelo harness: não equivale ao botão público ou download da release. Registro/atalhos foram restaurados, prévia reaberta e hashes de configuração/env e dos 20 WAVs originais preservados. Gate público pelos botões será registrado separadamente após publicação.
+`C:/Users/ziull/Documents/pace-speaker-152-install-20261021/report-install.json`: aprovado, processo exit0 e cleanup_errors vazio. Instalou o pacote limpo; instalou a baseline pública 1.5.1 real; aguardou o pai antigo e aplicou 1.5.2 via helper candidato congelado. Receipt/versão/canários/limite indefinido conferidos. Nesse gate, pacote e helper novos são semeados pelo harness: não equivale ao botão público ou download da release. Registro/atalhos foram restaurados, prévia reaberta e hashes de configuração/env e dos 20 WAVs originais preservados. Gate público pelos botões registrado separadamente no documento de publicação.
 
 ## Limites e compatibilidade
 
