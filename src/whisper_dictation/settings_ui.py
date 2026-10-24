@@ -78,8 +78,16 @@ def create_settings_context(project_root: Path, config: AppConfig) -> tuple[Save
             updater.prepare_update(update)
         return update
 
+    def agents_action(action: str) -> str:
+        from whisper_dictation import agents
+        if action == "status":
+            return agents.describe(agents.status(project_root))
+        report = agents.connect(project_root) if action == "connect" else agents.disconnect(project_root)
+        return agents.describe(report)
+
     context = SettingsContext(
         version=__version__,
+        agents_action=agents_action if (project_root / "pace-cli.exe").is_file() else None,
         open_logs=lambda: os.startfile(log_dir),
         open_project_folder=lambda: os.startfile(project_root),
         copy_last_transcript=lambda: send_command(COPY_LAST_TRANSCRIPT),

@@ -12,8 +12,10 @@ from datetime import datetime, timezone
 import uuid
 
 
-BUSY_STATUSES = frozenset({"new", "starting", "recording", "paused", "importing", "queued", "transcribing", "diarizing", "finalizing", "preparing", "processing", "cancelling"})
-_FIELDS = frozenset({"title", "origin", "duration", "status", "progress", "error", "audio_path", "result_path", "partial_result_path", "stage", "transcription_warning", "backend", "backend_override", "speaker_names", "source_path", "worker_pid", "fallback_reason", "num_speakers", "min_speakers", "max_speakers"})
+BUSY_STATUSES = frozenset({"new", "starting", "recording", "paused", "importing", "queued", "transcribing", "diarizing", "finalizing", "preparing", "processing", "cancelling", "resuming"})
+# Statuses in which a worker process should be running for the recording.
+ACTIVE_STATUSES = frozenset({"transcribing", "diarizing", "importing", "processing", "resuming"})
+_FIELDS = frozenset({"title", "origin", "duration", "status", "progress", "error", "audio_path", "result_path", "partial_result_path", "stage", "transcription_warning", "backend", "backend_override", "speaker_names", "source_path", "worker_pid", "fallback_reason", "num_speakers", "min_speakers", "max_speakers", "requested_by", "source_sha256", "job_options", "resume_count"})
 
 
 def default_recordings_root() -> Path:

@@ -10,5 +10,6 @@ build/
 dist/
 Output/
 *.spec
+!Pace.spec
 whatsapp_export/
 .runtime-directml/

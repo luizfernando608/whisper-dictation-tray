@@ -16,6 +16,10 @@ from whisper_dictation.updater import (
     UpdateError, _filesystem_path, _parse_version, hidden_process_options, update_cache_root, validate_installer,
 )
 from whisper_dictation.update_integration import snapshot_integration, restore_integration
+from whisper_dictation import processes
+
+# Binaries replaced by the installer; everything else in the folder is user data.
+BINARIES = ("Pace.exe", "pace-cli.exe", "_internal")
 
 _logger = logging.getLogger("whisper_dictation.update_helper")
 
@@ -71,9 +75,31 @@ def _read_plan(path: Path) -> dict:
     return plan
 
 
+def stop_installation_processes(target: Path, attempts: int = 3) -> None:
+    """Close what still runs from the installation: MCP servers opened by agents
+    (pace-cli.exe) and transcription workers. Running EXEs/DLLs cannot be
+    replaced, so the installer would fail. Workers resume from checkpoints."""
+    remaining: list = []
+    for _ in range(attempts):
+        remaining = processes.processes_in(target)
+        if not remaining:
+            return
+        for pid, image in remaining:
+            _logger.info("Encerrando processo da instalação antes de atualizar: %s (PID %s).", image.name, pid)
+            processes.terminate(pid)
+        time.sleep(0.5)
+    remaining = processes.processes_in(target)
+    if remaining:
+        names = ", ".join(sorted({image.name for _, image in remaining}))
+        raise UpdateError(f"Processos do PACE ainda abertos ({names}); a atualização foi adiada.")
+
+
 def _snapshot(target: Path, backup: Path) -> None:
     backup.mkdir()
     shutil.copy2(_filesystem_path(target / "Pace.exe"), _filesystem_path(backup / "Pace.exe"))
+    cli = target / "pace-cli.exe"
+    if cli.is_file() and not cli.is_symlink():
+        shutil.copy2(_filesystem_path(cli), _filesystem_path(backup / "pace-cli.exe"))
     internal = target / "_internal"
     if internal.exists():
         if internal.is_symlink() or getattr(internal, "is_junction", lambda: False)():
@@ -83,7 +109,7 @@ def _snapshot(target: Path, backup: Path) -> None:
 
 def _restore(target: Path, backup: Path) -> None:
     """Replace only explicitly named application binaries, never user data."""
-    for name in ("Pace.exe", "_internal"):
+    for name in BINARIES:
         current = target / name
         saved = backup / name
         if current.is_symlink() or getattr(current, "is_junction", lambda: False)():
@@ -165,9 +191,11 @@ def apply_update(plan_path: Path) -> int:
         _write_ready(staging, plan)
         wait_for_process_exit(int(plan["parent_pid"]))
         parent_exited = True
+        stop_installation_processes(target)
         _snapshot(target, backup)
         snapshot_integration(target, backup / "integration")
         Path(plan["receipt"]).unlink(missing_ok=True)
+        stop_installation_processes(target)  # an agent may have reopened its MCP server meanwhile
         installation_started = True
         result = subprocess.run(
             [plan["installer"], "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-",

@@ -56,7 +56,18 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def is_cli_invocation(argv: list[str], executable: str) -> bool:
+    """pace-cli.exe (console build) or `main.py cli ...` when running from source."""
+    return Path(executable).stem.lower() == "pace-cli" or (len(argv) > 1 and argv[1] == "cli")
+
+
 def main() -> int:
+    if is_cli_invocation(sys.argv, sys.executable):
+        from whisper_dictation.cli import main as cli_main
+        arguments = sys.argv[1:]
+        if arguments[:1] == ["cli"]:
+            arguments = arguments[1:]
+        return cli_main(arguments, PROJECT_ROOT)
     args = build_parser().parse_args()
     if args.nemotron_runtime:
         if not all((args.native_root, args.native_device, args.native_audio, args.native_result)):

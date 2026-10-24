@@ -131,6 +131,19 @@ class DictationApp:
     def _tray_ready(self, icon):
         icon.visible = True
         updater.confirm_running_version(self.project_root)
+        # After the update is confirmed: keep agents' skill and pace-cli path current.
+        threading.Thread(target=self._refresh_agents, name="AgentsRefresh", daemon=True).start()
+
+    def _refresh_agents(self) -> None:
+        if not (self.project_root / "pace-cli.exe").is_file():
+            return
+        try:
+            from whisper_dictation import agents
+            report = agents.refresh(self.project_root)
+            if report:
+                self.logger.info("Agentes de IA atualizados: %s", agents.describe(report).replace("\n", "; "))
+        except Exception:
+            self.logger.warning("Não foi possível atualizar a conexão com agentes de IA.", exc_info=True)
 
     def _build_runtime_components(
         self,
