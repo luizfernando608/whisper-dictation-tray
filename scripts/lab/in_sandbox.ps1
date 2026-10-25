@@ -77,8 +77,11 @@ function Start-Tray { Start-Process (Join-Path $App "Pace.exe"); Wait-Until { (S
 function Serve([string]$Tag, [string]$Installer) {
     [ordered]@{ tag = $Tag; installer = $Installer } | ConvertTo-Json | Set-Content -Path "$Run\release.json" -Encoding utf8
 }
-function Cli([string[]]$Arguments) {
+# Não chamar de "Cli": no PowerShell "cli" é alias de Clear-Item e aliases vencem funções.
+function Invoke-PaceCli([string[]]$Arguments) {
     $output = & $Cli @Arguments 2>"$Run\cli-stderr.txt"
+    $script:CliErr = (Get-Content -Raw -Encoding utf8 "$Run\cli-stderr.txt" -ErrorAction SilentlyContinue)
+    if ($script:CliErr) { Add-Content -Path (Join-Path $Results "pace-cli-stderr.log") -Value "== pace-cli $($Arguments -join ' ')`n$script:CliErr" -Encoding utf8 }
     $script:CliExit = $LASTEXITCODE
     return ($output -join "`n")
 }
@@ -90,8 +93,39 @@ function Last-UpdateResult {
     $latest = Get-ChildItem (Join-Path $Data "updates\runs\*\result.json") -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1
     if ($latest) { Get-Content -Raw $latest.FullName | ConvertFrom-Json }
 }
+function Request-Update([string]$Version) {
+    # Como um usuário real: só pede "Reiniciar para atualizar" depois que o download feito pelo PACE
+    # terminou. A 1.5.2 publicada ignora o pedido se a verificação da inicialização ainda estiver baixando.
+    $runs = Join-Path $Data "updates\runs"
+    $cache = Join-Path $Data "updates\$Version"
+    $before = @(Get-ChildItem $runs -Directory -ErrorAction SilentlyContinue).Count
+    $deadline = (Get-Date).AddMinutes(15)
+    while ((Get-Date) -lt $deadline) {
+        # Download em andamento = .partial sendo gravado agora. Um .partial parado é sobra de um PACE
+        # fechado no meio do download e não impede o pedido.
+        $complete = Test-Path (Join-Path $cache "Pace_Installer.exe")
+        $active = @(Get-ChildItem $cache -Filter "*.partial" -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -gt (Get-Date).AddSeconds(-20) }).Count -gt 0
+        $downloading = $active -and -not $complete
+        if (-not $downloading) {
+            try { Send-Pace "apply-update" } catch {}
+            $wait = (Get-Date).AddSeconds(90)
+            while ((Get-Date) -lt $wait) {
+                if (@(Get-ChildItem $runs -Directory -ErrorAction SilentlyContinue).Count -gt $before) {
+                    Log "      pedido de atualização para $Version aceito"
+                    return
+                }
+                Start-Sleep -Seconds 2
+            }
+            Log "      pedido de atualização para $Version sem efeito; repetindo"
+        }
+        Start-Sleep -Seconds 5
+    }
+    throw "o PACE não iniciou a atualização para $Version"
+}
 function Start-McpServer {
-    $info = New-Object Diagnostics.ProcessStartInfo $Cli, "mcp"
+    # Via cmd só para guardar o stderr do servidor em C:\results (stdin/stdout seguem direto para o pace-cli).
+    $info = New-Object Diagnostics.ProcessStartInfo "cmd.exe", "/d /s /c `"`"$Cli`" mcp 2>>`"$Results\mcp-stderr.log`"`""
     $info.UseShellExecute = $false
     $info.RedirectStandardInput = $true
     $info.RedirectStandardOutput = $true
@@ -104,7 +138,8 @@ function Mcp([Diagnostics.Process]$Process, [string]$Json, [int]$Seconds = 60) {
     $Process.StandardInput.Flush()
     $task = $Process.StandardOutput.ReadLineAsync()
     Assert ($task.Wait($Seconds * 1000)) "sem resposta do MCP"
-    return ($task.Result | ConvertFrom-Json)
+    $script:McpRaw = "$($task.Result)"
+    try { return ($task.Result | ConvertFrom-Json) } catch { throw "resposta MCP inválida: [$script:McpRaw]" }
 }
 
 try {
@@ -141,8 +176,10 @@ try {
     Log "== 2. atualização automática real: 1.5.2 -> 1.6.0"
     Check "1.5.2 atualiza sozinha para 1.6.0 pelo fluxo do app" {
         Start-Tray
-        Send-Pace "apply-update"
+        Request-Update "1.6.0"
         Wait-Until { (Installed-Version) -eq "1.6.0" -and (Running-Version) -eq "1.6.0" } 600 "1.6.0 instalada e confirmada"
+        # O auxiliar grava result.json logo depois de ver a confirmação da nova versão.
+        Wait-Until { (Last-UpdateResult).status -eq "updated" } 60 "resultado do auxiliar"
         $result = Last-UpdateResult
         Assert ($result.status -eq "updated") "resultado do auxiliar: $($result | ConvertTo-Json -Compress)"
         "1.6.0 confirmada"
@@ -153,9 +190,9 @@ try {
         "iguais"
     }
     Check "pace-cli instalado e funcional" {
-        $version = Cli @("--version")
-        Assert ($version -eq "PACE 1.6.0") "versão: $version"
-        $doctor = Cli @("doctor", "--json") | ConvertFrom-Json
+        $version = Invoke-PaceCli @("--version")
+        Assert ($version -eq "PACE 1.6.0") "versão: [$version] stderr: $script:CliErr"
+        $doctor = Invoke-PaceCli @("doctor", "--json") | ConvertFrom-Json
         Assert ($doctor.api_key_configured -eq $true) "chave não encontrada após a atualização"
         "doctor ok, chave detectada (sem exibir)"
     }
@@ -166,18 +203,19 @@ try {
         Set-Content "$HOME\.claude.json" '{"numStartups": 1}' -Encoding ascii
         Set-Content "$HOME\.codex\config.toml" "model = `"gpt-5`"`n" -Encoding ascii
         Set-Content "$env:APPDATA\Claude\claude_desktop_config.json" '{"preferences": {"laboratorio": true}}' -Encoding ascii
-        $report = Cli @("agents", "connect", "--json") | ConvertFrom-Json
+        $report = Invoke-PaceCli @("agents", "connect", "--json") | ConvertFrom-Json
         Assert ($script:CliExit -eq 0) "agents connect saiu com $script:CliExit"
         $claude = Get-Content -Raw "$HOME\.claude.json" | ConvertFrom-Json
         Assert ($claude.mcpServers.pace.command -eq $Cli) "Claude Code sem o PACE"
         Assert ((Get-Content -Raw "$HOME\.codex\config.toml") -match "mcp_servers\.pace") "Codex sem o PACE"
         Assert (Test-Path "$HOME\.claude\skills\pace-transcricao\SKILL.md") "skill ausente"
+        $script:AgentsConnected = $true
         ($report.PSObject.Properties.Name -join ",")
     }
     Check "servidor MCP: handshake, ferramentas e diagnóstico" {
         $script:Mcp = Start-McpServer
         $init = Mcp $script:Mcp '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
-        Assert ($init.result.serverInfo.version -eq "1.6.0") "versão MCP $($init.result.serverInfo.version)"
+        Assert ($init.result.serverInfo.version -eq "1.6.0") "resposta MCP inesperada: [$script:McpRaw]"
         $tools = Mcp $script:Mcp '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
         $status = Mcp $script:Mcp '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"pace_status","arguments":{}}}' 120
         Assert (-not $status.result.isError) "pace_status falhou: $($status.result.content[0].text)"
@@ -196,7 +234,7 @@ try {
         $config | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $App "config.json") -Encoding utf8
         $script:Fingerprint = Data-Fingerprint
         $started = Get-Date
-        $json = Cli @("transcribe", "$Lab\fixtures\whatsapp.ogg", "--local", "--json", "-q", "--timeout", "1500")
+        $json = Invoke-PaceCli @("transcribe", "$Lab\fixtures\whatsapp.ogg", "--local", "--json", "-q", "--timeout", "1500")
         Assert ($script:CliExit -eq 0) "saída $script:CliExit; stderr: $(Get-Content -Raw "$Run\cli-stderr.txt")"
         $result = $json | ConvertFrom-Json
         Assert ($result.turns.Count -ge 2) "poucas falas: $($result.turns.Count)"
@@ -205,7 +243,7 @@ try {
         "{0} falas, {1} falante(s), {2:n0} s" -f $result.turns.Count, $result.speakers.Count, ((Get-Date) - $started).TotalSeconds
     }
     Check "transcrição aparece na biblioteca do PACE" {
-        $list = Cli @("list", "--json") | ConvertFrom-Json
+        $list = Invoke-PaceCli @("list", "--json") | ConvertFrom-Json
         Assert ($list[0].requested_by -eq "agent" -and $list[0].status -eq "ready") "lista: $($list | ConvertTo-Json -Compress)"
         $list[0].id
     }
@@ -214,8 +252,9 @@ try {
     Check "1.6.0 atualiza para 1.6.1 mesmo com MCP aberto" {
         Assert (-not $script:Mcp.HasExited) "servidor MCP já tinha fechado"
         Serve "v1.6.1" "$Lab\next\Pace_Installer.exe"
-        Send-Pace "apply-update"
+        Request-Update "1.6.1"
         Wait-Until { (Installed-Version) -eq "1.6.1" -and (Running-Version) -eq "1.6.1" } 600 "1.6.1 instalada e confirmada"
+        Wait-Until { (Last-UpdateResult).version -eq "1.6.1" } 60 "resultado do auxiliar"
         $result = Last-UpdateResult
         Assert ($result.status -eq "updated") "resultado: $($result | ConvertTo-Json -Compress)"
         Assert ($script:Mcp.HasExited) "o servidor MCP antigo continuou rodando"
@@ -224,17 +263,17 @@ try {
     Check "dados preservados (1.6.0 -> 1.6.1)" {
         $now = Data-Fingerprint
         Assert ($now -eq $script:Fingerprint) "antes $script:Fingerprint, depois $now"
-        $list = Cli @("list", "--json") | ConvertFrom-Json
+        $list = Invoke-PaceCli @("list", "--json") | ConvertFrom-Json
         Assert ($list.Count -ge 1) "biblioteca vazia"
         "iguais; biblioteca com $($list.Count) item(ns)"
     }
     Check "skill e MCP dos agentes atualizados para 1.6.1" {
         Wait-Until { (Get-Content -Raw "$HOME\.claude\skills\pace-transcricao\SKILL.md") -match "v1\.6\.1" } 60 "skill v1.6.1"
-        Assert ((Cli @("--version")) -eq "PACE 1.6.1") "pace-cli não é 1.6.1"
+        Assert ((Invoke-PaceCli @("--version")) -eq "PACE 1.6.1") "pace-cli não é 1.6.1"
         $server = Start-McpServer
         $init = Mcp $server '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
         $server.Kill()
-        Assert ($init.result.serverInfo.version -eq "1.6.1") "MCP $($init.result.serverInfo.version)"
+        Assert ($init.result.serverInfo.version -eq "1.6.1") "resposta MCP inesperada: [$script:McpRaw]"
         "skill v1.6.1, MCP 1.6.1"
     }
 
@@ -243,20 +282,21 @@ try {
         Copy-Item "$Lab\abort\Pace_Failure_Installer.exe" "$Run\Pace_Installer.exe" -Force
         Serve "v1.6.2" "$Run\Pace_Installer.exe"
         $before = @(Get-ChildItem (Join-Path $Data "updates\runs\*\result.json") -ErrorAction SilentlyContinue).Count
-        Send-Pace "apply-update"
+        Request-Update "1.6.2"
         Wait-Until { @(Get-ChildItem (Join-Path $Data "updates\runs\*\result.json") -ErrorAction SilentlyContinue).Count -gt $before } 300 "resultado da tentativa"
         Assert ((Last-UpdateResult).status -eq "failed") "esperava falha"
         $updateLog = Get-ChildItem (Join-Path $Data "updates\runs\*\update.log") | Sort-Object LastWriteTime | Select-Object -Last 1
         # Só conta como rollback se o auxiliar chegou a restaurar os binários (falha antes disso não testa nada).
         Assert ((Get-Content -Raw -Encoding utf8 $updateLog.FullName) -match "Binários anteriores restaurados") "o auxiliar não restaurou os binários"
         Wait-Until { (Running-Version) -eq "1.6.1" } 120 "1.6.1 reaberta"
-        Assert ((Cli @("--version")) -eq "PACE 1.6.1") "pace-cli quebrado após rollback"
+        Assert ((Invoke-PaceCli @("--version")) -eq "PACE 1.6.1") "pace-cli quebrado após rollback"
         Assert ((Data-Fingerprint) -eq $script:Fingerprint) "dados mudaram no rollback"
         "rollback ok; pace-cli e dados intactos"
     }
 
     Log "== 7. desinstalação remove as conexões com agentes"
     Check "desinstalar limpa MCP e skill dos agentes" {
+        Assert ([bool]$script:AgentsConnected) "os agentes nunca foram conectados; a limpeza não seria testada"
         Send-Pace "quit"
         Wait-Until { -not (Get-Process Pace -ErrorAction SilentlyContinue) } 60 "fechar PACE"
         $process = Start-Process (Join-Path $App "unins000.exe") -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru

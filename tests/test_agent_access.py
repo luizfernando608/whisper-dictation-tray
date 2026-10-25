@@ -795,6 +795,10 @@ class McpRobustnessTests(JobsBase):
             thread.join(30)
         replies = {m["id"]: m for m in map(json.loads, output.getvalue().splitlines()) if "id" in m}
         self.assertEqual(replies[1]["error"]["code"], -32602)
+        bom = io.BytesIO()
+        mcp_server.Server(self.context, bom).handle_line(
+            b'\xef\xbb\xbf{"jsonrpc":"2.0","id":9,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}\r\n')
+        self.assertEqual(json.loads(bom.getvalue())["result"]["serverInfo"]["name"], "pace")
         self.assertIn("result", replies[2])
         self.assertEqual(replies[3]["result"], {})
 

@@ -112,7 +112,9 @@ class Server:
         self.send(message)
 
     def handle_line(self, line: bytes) -> None:
-        line = line.strip()
+        # .NET clients whose stdin encoding is UTF-8 with preamble (common on a fresh Windows)
+        # prefix the first message with a BOM.
+        line = line.strip().removeprefix(b"\xef\xbb\xbf").strip()
         if not line:
             return
         try:
