@@ -9,7 +9,14 @@ $ProgressPreference = "SilentlyContinue"
 # Segurança: este roteiro altera certificados, hosts e configs de agentes. Só roda na sandbox
 # descartável aberta por run_lab.ps1 (usuário da sandbox + marcador na pasta mapeada).
 if ($env:USERNAME -ne "WDAGUtilityAccount" -or -not (Test-Path (Join-Path $Lab "pace-lab.marker"))) {
-    Write-Error "in_sandbox.ps1 só pode rodar dentro da Windows Sandbox do laboratório (use scripts\lab\run_lab.ps1)."
+    $reason = "in_sandbox.ps1 só roda dentro da Windows Sandbox do laboratório (usuário atual: $env:USERNAME). Use scripts\lab\run_lab.ps1."
+    if ((Test-Path (Join-Path $Lab "pace-lab.marker")) -and (Test-Path $Results)) {
+        # Dentro da sandbox do laboratório, mas com outro usuário: avisa o host em vez de deixá-lo esperando.
+        Add-Content -Path (Join-Path $Results "lab.log") -Value $reason -Encoding utf8
+        [ordered]@{ finished = $true; passed = $false; checks = @([ordered]@{ name = "ambiente"; ok = $false; detail = $reason }) } |
+            ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $Results "report.json") -Encoding utf8
+    }
+    Write-Error $reason
     exit 3
 }
 $Run = "C:\labrun"

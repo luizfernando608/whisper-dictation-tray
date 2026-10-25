@@ -742,6 +742,45 @@ class ReviewFindingTests(JobsBase):
         self.assertFalse((self.context.store().directory(row["id"]) / "cancel.request").exists())
 
 
+    def test_rows_owned_by_this_process_are_alive_only_while_it_launches(self):
+        record, _ = agent_jobs.start(self.context, self.audio)
+        store = self.context.store()
+        store.update(record["id"], **processes.owner())  # the last write (child pid) failed
+        self.alive.return_value = True  # other owners would count as alive
+        resumed = agent_jobs.ensure_running(self.context, record["id"])
+        self.assertEqual(resumed["status"], "processing")
+        self.assertEqual(resumed["worker_pid"], 4242)
+        store.update(record["id"], **processes.owner())
+        with agent_jobs._owning(record["id"]):
+            self.assertTrue(agent_jobs._alive(store.get(record["id"])))
+            with agent_jobs._owning(record["id"]):
+                pass  # a second thread finishing must not clear the first one's mark
+            self.assertTrue(agent_jobs._alive(store.get(record["id"])))
+        self.assertFalse(agent_jobs._alive(store.get(record["id"])))
+
+    def test_tray_rows_with_its_own_pid_do_not_keep_it_busy(self):
+        service = self.make_service("tray3")
+        row = service.store.create("x", "import", status="processing", **processes.owner())
+        self.assertFalse(service.busy)
+        service._worker_id = row["id"]
+        self.assertTrue(service.busy)
+        service._worker_id = None
+
+    def test_tray_does_not_overwrite_a_job_an_agent_took_over(self):
+        service = self.make_service("tray4")
+        row = service.store.create("x", "import", status="queued")
+        process = MagicMock(pid=31337)
+        process.poll.return_value = None
+        with patch("whisper_dictation.meeting_service.subprocess.Popen", return_value=process), \
+             patch("whisper_dictation.meeting_service.ChildJob"):
+            service._advance_queue()
+        service.store.update(row["id"], status="resuming", worker_pid=999)  # agent resumed after a crash
+        process.poll.return_value = 1
+        service._advance_queue()
+        self.assertEqual(service.store.get(row["id"])["status"], "resuming")
+        self.assertIsNone(service._worker)
+
+
 class McpRobustnessTests(JobsBase):
     def test_malformed_params_never_stop_the_server(self):
         output = io.BytesIO()

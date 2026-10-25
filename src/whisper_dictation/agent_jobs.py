@@ -12,7 +12,9 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -25,6 +27,33 @@ MEDIA_EXTENSIONS = frozenset({".wav", ".mp3", ".m4a", ".ogg", ".oga", ".opus", "
                               ".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".3gp", ".amr"})
 DONE_STATUSES = frozenset({"ready", "failed", "cancelled", "interrupted"})
 MAX_RESUMES = 2
+
+# Jobs this process is launching a worker for right now (it is their recorded owner).
+_spawning: dict[str, int] = {}  # id -> threads currently claiming/launching it
+_spawning_lock = threading.Lock()
+
+
+def _alive(record: dict) -> bool:
+    """A row owned by this very process (e.g. the long-lived MCP server) is alive only
+    while it is launching the worker; if its last store write failed, it is resumable."""
+    if record.get("worker_pid") == os.getpid():
+        with _spawning_lock:
+            return _spawning.get(record["id"], 0) > 0
+    return record_worker_alive(record)
+
+
+@contextmanager
+def _owning(recording_id: str):
+    """Mark a job as being claimed/launched by this process (before the claim itself)."""
+    with _spawning_lock:
+        _spawning[recording_id] = _spawning.get(recording_id, 0) + 1
+    try:
+        yield
+    finally:
+        with _spawning_lock:
+            remaining = _spawning.pop(recording_id) - 1
+            if remaining:
+                _spawning[recording_id] = remaining
 
 
 class JobError(RuntimeError):
@@ -177,8 +206,9 @@ def start(context: Context, source: str | os.PathLike, *, speakers=None, min_spe
                           num_speakers=speakers, min_speakers=min_speakers, max_speakers=max_speakers,
                           stage="Na fila", **processes.owner())
     try:
-        config.save(store.directory(record["id"]) / "worker_config.json")
-        pid = _spawn_worker(context, store, record["id"])
+        with _owning(record["id"]):
+            config.save(store.directory(record["id"]) / "worker_config.json")
+            pid = _spawn_worker(context, store, record["id"])
     except Exception as exc:
         store.update(record["id"], status="failed", error=f"Não foi possível iniciar o processamento: {exc}")
         raise JobError(f"Não foi possível iniciar o processamento: {exc}", code="worker_failed") from exc
@@ -204,7 +234,7 @@ def ensure_running(context: Context, recording_id: str) -> dict:
     status = record["status"]
     if status not in ACTIVE_STATUSES | {"queued"}:
         return record
-    if status in ACTIVE_STATUSES and record_worker_alive(record):
+    if status in ACTIVE_STATUSES and _alive(record):
         return record  # includes "resuming" while its owner is still starting the worker
     if status == "queued":
         from whisper_dictation.single_instance import probe
@@ -219,16 +249,17 @@ def ensure_running(context: Context, recording_id: str) -> dict:
                          error="O processamento parou sem concluir." + (f" Último registro: {detail}" if detail else ""))
         return store.get(recording_id)
     # Compare-and-set on the owner we saw dead: never steal a job someone just claimed.
-    if not store.transition(recording_id, status, "resuming", expect=seen_owner, stage="Retomando",
-                            resume_count=attempts + 1, **processes.owner()):
-        return store.get(recording_id)
-    try:
-        snapshot = store.directory(recording_id) / "worker_config.json"
-        if not snapshot.is_file():
-            context.config().save(snapshot)  # the worker re-applies the job's own options
-        pid = _spawn_worker(context, store, recording_id)
-    except Exception as exc:
-        return store.update(recording_id, status="failed", error=f"Não foi possível retomar: {exc}")
+    with _owning(recording_id):
+        if not store.transition(recording_id, status, "resuming", expect=seen_owner, stage="Retomando",
+                                resume_count=attempts + 1, **processes.owner()):
+            return store.get(recording_id)
+        try:
+            snapshot = store.directory(recording_id) / "worker_config.json"
+            if not snapshot.is_file():
+                context.config().save(snapshot)  # the worker re-applies the job's own options
+            pid = _spawn_worker(context, store, recording_id)
+        except Exception as exc:
+            return store.update(recording_id, status="failed", error=f"Não foi possível retomar: {exc}")
     return store.update(recording_id, status="processing", **processes.owner(pid))
 
 
@@ -273,7 +304,7 @@ def cancel(context: Context, recording_id: str) -> dict:
                        "Encerre a reunião pelo PACE.", exit_code=2, code="not_cancellable")
     store = context.store()
     (store.directory(recording_id) / "cancel.request").write_text("agent", encoding="utf-8")
-    if record["status"] == "queued" or not record_worker_alive(record):
+    if record["status"] == "queued" or not _alive(record):
         store.transition(recording_id, record["status"], "cancelled", expect={"worker_pid": record.get("worker_pid")},
                          stage="Cancelado", error="")
     return store.get(recording_id)

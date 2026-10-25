@@ -29,6 +29,17 @@ fica ao lado do runtime da 1.5.2. Nada aponta para ele (agentes só são conecta
 botão), a próxima instalação o substitui (`InstallDelete`) e a desinstalação da 1.6+ o remove. Não há
 como mudar o comportamento do auxiliar já publicado; a partir da 1.6.0 o backup inclui `pace-cli.exe`.
 
+## Revisão independente (rodada 2)
+
+Sobre o commit 5cb7e0b: nenhum achado crítico ou alto. Corrigidos: linha reivindicada pelo próprio
+processo (PACE aberto ou servidor MCP) não conta como viva se a gravação final no banco falhar, e as
+escritas de estado do PACE aberto passaram a comparar o dono; o laboratório registra relatório quando
+roda fora do ambiente esperado. Fica registrado, sem correção: se o `pace-cli` morrer exatamente entre
+iniciar o worker e gravar o PID dele, uma retomada pode iniciar um segundo worker (janela de
+milissegundos, já existente antes; o resultado é o mesmo, apenas com custo de processamento dobrado).
+Um teste de interface (`test_ctrl_f_can_be_captured`) falhou uma vez na suíte completa e passa sozinho
+(instabilidade de atalho/GUI, não relacionada).
+
 ## Laboratório (Windows Sandbox)
 
 Pendente: requer o recurso Windows Sandbox ativado (administrador + reinício).
