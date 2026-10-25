@@ -216,7 +216,8 @@ def _claude_code(env: Environment, cli: Path | None, version: str) -> dict:
     if command and cli is None and registered is None:
         command = None  # nothing of ours to remove through the CLI
     if command:
-        options = {"capture_output": True, "text": True, "timeout": 60, "stdin": subprocess.DEVNULL}
+        options = {"capture_output": True, "encoding": "utf-8", "errors": "replace", "timeout": 60,
+                   "stdin": subprocess.DEVNULL}
         if os.name == "nt":
             options["creationflags"] = subprocess.CREATE_NO_WINDOW
         try:
@@ -227,8 +228,8 @@ def _claude_code(env: Environment, cli: Path | None, version: str) -> dict:
                 if done.returncode != 0:
                     raise RuntimeError(done.stderr.strip() or done.stdout.strip())
             changed, method = True, "claude mcp"
-        except (OSError, subprocess.SubprocessError, RuntimeError):
-            command = None
+        except (OSError, ValueError, subprocess.SubprocessError, RuntimeError):
+            command = None  # fall back to editing ~/.claude.json directly
     if not command:
         changed = _json_set_server(env.home / ".claude.json", env, "claude-code",
                                    {"type": "stdio", **server_entry(cli)} if cli is not None else None)

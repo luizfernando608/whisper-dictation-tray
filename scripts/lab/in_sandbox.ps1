@@ -6,6 +6,12 @@ param([string]$Lab = "C:\lab", [string]$Results = "C:\results")
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
+# Segurança: este roteiro altera certificados, hosts e configs de agentes. Só roda na sandbox
+# descartável aberta por run_lab.ps1 (usuário da sandbox + marcador na pasta mapeada).
+if ($env:USERNAME -ne "WDAGUtilityAccount" -or -not (Test-Path (Join-Path $Lab "pace-lab.marker"))) {
+    Write-Error "in_sandbox.ps1 só pode rodar dentro da Windows Sandbox do laboratório (use scripts\lab\run_lab.ps1)."
+    exit 3
+}
 $Run = "C:\labrun"
 New-Item -ItemType Directory -Force $Run, $Results | Out-Null
 $App = Join-Path $env:LOCALAPPDATA "Pace"
@@ -152,7 +158,7 @@ try {
         New-Item -ItemType Directory -Force "$HOME\.claude", "$HOME\.codex", "$env:APPDATA\Claude" | Out-Null
         Set-Content "$HOME\.claude.json" '{"numStartups": 1}' -Encoding ascii
         Set-Content "$HOME\.codex\config.toml" "model = `"gpt-5`"`n" -Encoding ascii
-        Set-Content "$env:APPDATA\Claude\claude_desktop_config.json" '{}' -Encoding ascii
+        Set-Content "$env:APPDATA\Claude\claude_desktop_config.json" '{"preferences": {"laboratorio": true}}' -Encoding ascii
         $report = Cli @("agents", "connect", "--json") | ConvertFrom-Json
         Assert ($script:CliExit -eq 0) "agents connect saiu com $script:CliExit"
         $claude = Get-Content -Raw "$HOME\.claude.json" | ConvertFrom-Json
@@ -233,6 +239,9 @@ try {
         Send-Pace "apply-update"
         Wait-Until { @(Get-ChildItem (Join-Path $Data "updates\runs\*\result.json") -ErrorAction SilentlyContinue).Count -gt $before } 300 "resultado da tentativa"
         Assert ((Last-UpdateResult).status -eq "failed") "esperava falha"
+        $updateLog = Get-ChildItem (Join-Path $Data "updates\runs\*\update.log") | Sort-Object LastWriteTime | Select-Object -Last 1
+        # Só conta como rollback se o auxiliar chegou a restaurar os binários (falha antes disso não testa nada).
+        Assert ((Get-Content -Raw -Encoding utf8 $updateLog.FullName) -match "Binários anteriores restaurados") "o auxiliar não restaurou os binários"
         Wait-Until { (Running-Version) -eq "1.6.1" } 120 "1.6.1 reaberta"
         Assert ((Cli @("--version")) -eq "PACE 1.6.1") "pace-cli quebrado após rollback"
         Assert ((Data-Fingerprint) -eq $script:Fingerprint) "dados mudaram no rollback"
@@ -244,9 +253,14 @@ try {
         Send-Pace "quit"
         Wait-Until { -not (Get-Process Pace -ErrorAction SilentlyContinue) } 60 "fechar PACE"
         $process = Start-Process (Join-Path $App "unins000.exe") -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
+        Assert ($process.ExitCode -eq 0) "desinstalador retornou $($process.ExitCode)"
         Wait-Until { -not (Test-Path $Cli) } 120 "arquivos removidos"
         $claude = Get-Content -Raw "$HOME\.claude.json" | ConvertFrom-Json
         Assert (-not $claude.mcpServers.pace) "entrada do PACE ficou no Claude Code"
+        Assert ($claude.numStartups -eq 1) "~/.claude.json perdeu dados (numStartups)"
+        $desktop = Get-Content -Raw "$env:APPDATA\Claude\claude_desktop_config.json" | ConvertFrom-Json
+        Assert (-not $desktop.mcpServers.pace) "entrada do PACE ficou no Claude Desktop"
+        Assert ($desktop.preferences.laboratorio -eq $true) "config do Claude Desktop perdeu dados"
         Assert (-not (Test-Path "$HOME\.claude\skills\pace-transcricao")) "skill ficou"
         Assert (-not ((Get-Content -Raw "$HOME\.codex\config.toml") -match "mcp_servers\.pace")) "Codex ficou com o PACE"
         Assert ((Get-Content -Raw "$HOME\.codex\config.toml") -match "gpt-5") "config do Codex perdeu dados"

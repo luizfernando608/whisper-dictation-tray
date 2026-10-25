@@ -34,6 +34,7 @@ foreach ($pair in @(@("baseline", $Baseline), @("candidate", $Candidate), @("nex
     Copy-Item $source (Join-Path $Stage "$($pair[0])\Pace_Installer.exe")
 }
 Copy-Item (Join-Path $PSScriptRoot "in_sandbox.ps1"), (Join-Path $PSScriptRoot "fake_github.ps1") $Stage
+Set-Content (Join-Path $Stage "pace-lab.marker") "Pasta do laboratório PACE (somente sandbox)." -Encoding utf8
 if ($KeepOpen) { Set-Content (Join-Path $Stage "keep-open.flag") "1" }
 
 Write-Host "Gerando áudios de teste..." -ForegroundColor Cyan
@@ -82,12 +83,18 @@ while ((Get-Date) -lt $Deadline) {
     $LogPath = Join-Path $Output "lab.log"
     if (Test-Path $LogPath) {
         $lines = @(Get-Content $LogPath -Encoding utf8)
-        $lines[$Shown..($lines.Count - 1)] | Where-Object { $_ } | ForEach-Object { Write-Host $_ }
-        $Shown = $lines.Count
+        if ($lines.Count -gt $Shown) {
+            $lines[$Shown..($lines.Count - 1)] | Where-Object { $_ } | ForEach-Object { Write-Host $_ }
+            $Shown = $lines.Count
+        }
     }
-    if ((Test-Path $ReportPath) -and ((Get-Content -Raw $ReportPath -Encoding utf8 | ConvertFrom-Json).finished)) { break }
+    try {
+        # report.json é regravado a cada verificação; uma leitura no meio da escrita só adia a checagem.
+        if ((Test-Path $ReportPath) -and ((Get-Content -Raw $ReportPath -Encoding utf8 | ConvertFrom-Json).finished)) { break }
+    } catch {}
 }
-$Report = if (Test-Path $ReportPath) { Get-Content -Raw $ReportPath -Encoding utf8 | ConvertFrom-Json } else { $null }
+$Report = $null
+try { if (Test-Path $ReportPath) { $Report = Get-Content -Raw $ReportPath -Encoding utf8 | ConvertFrom-Json } } catch {}
 if (-not $KeepOpen) {
     Start-Sleep -Seconds 20
     Get-Process WindowsSandbox, WindowsSandboxClient, WindowsSandboxRemoteSession -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue

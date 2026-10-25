@@ -121,7 +121,12 @@ class Server:
             self.reply(None, error={"code": -32700, "message": "Parse error"})
             return
         for item in message if isinstance(message, list) else [message]:
-            self.dispatch(item)
+            try:
+                self.dispatch(item)
+            except Exception as exc:  # a malformed message must never stop the server
+                print(f"PACE MCP: mensagem inválida: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+                if isinstance(item, dict) and item.get("id") is not None and "method" in item:
+                    self.reply(item["id"], error={"code": -32603, "message": "Internal error"})
 
     def dispatch(self, message) -> None:
         if not isinstance(message, dict) or message.get("jsonrpc") != "2.0" or not isinstance(message.get("method"), str):
@@ -130,8 +135,14 @@ class Server:
             self.reply(message.get("id") if isinstance(message, dict) else None,
                        error={"code": -32600, "message": "Invalid Request"})
             return
-        method, params, request_id = message["method"], message.get("params") or {}, message.get("id")
+        method, params, request_id = message["method"], message.get("params"), message.get("id")
         is_notification = "id" not in message
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            if not is_notification:
+                self.reply(request_id, error={"code": -32602, "message": "Invalid params: expected an object"})
+            return
         if method == "notifications/cancelled":
             self._cancelled.add(params.get("requestId"))
             return
@@ -161,9 +172,10 @@ class Server:
     # ------------------------------------------------------------ tools
     def _call_tool(self, request_id, params: dict) -> None:
         name = params.get("name")
-        arguments = params.get("arguments") or {}
-        token = (params.get("_meta") or {}).get("progressToken")
         try:
+            arguments = params.get("arguments") or {}
+            meta = params.get("_meta") or {}
+            token = meta.get("progressToken") if isinstance(meta, dict) else None
             if not isinstance(arguments, dict):
                 raise JobError("arguments deve ser um objeto.", code="invalid_argument")
             handler = getattr(self, f"tool_{name}", None) if name in {tool["name"] for tool in TOOLS} else None

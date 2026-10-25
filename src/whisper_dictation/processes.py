@@ -42,6 +42,8 @@ def _kernel():
     kernel.TerminateProcess.restype = wintypes.BOOL
     kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
     kernel.WaitForSingleObject.restype = wintypes.DWORD
+    kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    kernel.GetProcessTimes.restype = wintypes.BOOL
     kernel.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
     kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
     kernel.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_ProcessEntry)]
@@ -127,9 +129,53 @@ def terminate(pid: int, timeout: float = 10.0) -> bool:
         kernel.CloseHandle(handle)
 
 
-def worker_alive(pid) -> bool:
+def creation_time(pid: int | None) -> float | None:
+    """When a running process started (Unix seconds), or None if unknown/exited."""
+    if os.name != "nt" or not isinstance(pid, int) or pid <= 0:
+        return None
+    kernel = _kernel()
+    handle = kernel.OpenProcess(_QUERY_LIMITED, False, pid)
+    if not handle:
+        return None
+    try:
+        times = [wintypes.FILETIME() for _ in range(4)]
+        if not kernel.GetProcessTimes(handle, *(ctypes.byref(item) for item in times)):
+            return None
+        ticks = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+        return (ticks - 116444736000000000) / 10_000_000
+    finally:
+        kernel.CloseHandle(handle)
+
+
+# Processes that may own a recording job: the worker itself (Pace.exe), the tray
+# while it starts a worker, or pace-cli while it claims/resumes a job.
+OWNER_IMAGES = frozenset({"pace.exe", "pace-cli.exe"})
+
+
+def owner(pid: int | None = None) -> dict:
+    """Store fields identifying the process that owns a job (default: this one)."""
+    pid = os.getpid() if pid is None else pid
+    return {"worker_pid": pid, "worker_started": creation_time(pid)}
+
+
+def worker_alive(pid, started: float | None = None) -> bool:
     """A recording worker (the tray's or an agent's) is still running.
 
-    Packaged workers are ``Pace.exe``; from source any live PID counts.
+    Packaged owners are ``Pace.exe``/``pace-cli.exe``; from source any live PID
+    counts. ``started`` (recorded with the PID) rejects a PID that Windows
+    reused for an unrelated process after a restart.
     """
-    return is_running(pid, "Pace.exe" if getattr(sys, "frozen", False) else None)
+    image = process_image(pid)
+    if image is None:
+        return False
+    if getattr(sys, "frozen", False) and image.name.lower() not in OWNER_IMAGES:
+        return False
+    if started is not None:
+        actual = creation_time(pid)
+        if actual is not None and abs(actual - float(started)) > 2.0:
+            return False
+    return True
+
+
+def record_worker_alive(record: dict) -> bool:
+    return worker_alive(record.get("worker_pid"), record.get("worker_started"))

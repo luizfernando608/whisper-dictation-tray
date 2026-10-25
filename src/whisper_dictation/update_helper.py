@@ -124,6 +124,26 @@ def _restore(target: Path, backup: Path) -> None:
             shutil.copy2(_filesystem_path(saved), _filesystem_path(current))
 
 
+def _stop_quietly(target: Path) -> None:
+    try:
+        stop_installation_processes(target)
+    except Exception:
+        _logger.warning("Processos da instalação ainda abertos antes do rollback.", exc_info=True)
+
+
+def _restore_closing_processes(target: Path, backup: Path) -> None:
+    """An agent may have reopened pace-cli.exe while the installer ran; its DLLs
+    would make the restore fail midway. Close what runs from the folder, restore,
+    and retry once after closing again."""
+    _stop_quietly(target)
+    try:
+        _restore(target, backup)
+    except OSError:
+        _logger.warning("Rollback falhou na primeira tentativa; encerrando processos e repetindo.", exc_info=True)
+        _stop_quietly(target)
+        _restore(target, backup)
+
+
 def _launch(target: Path, plan: dict | None = None) -> subprocess.Popen:
     environment = os.environ.copy()
     environment.pop("PACE_UPDATE_CONFIRMATION", None)
@@ -219,7 +239,7 @@ def apply_update(plan_path: Path) -> int:
                 if process is not None and process.poll() is None:
                     process.terminate()
                     process.wait(timeout=15)
-                _restore(target, backup)
+                _restore_closing_processes(target, backup)
             except Exception as restore_exc:
                 rollback_error = str(restore_exc)
                 _logger.exception("Rollback falhou; backup preservado em %s.", backup)

@@ -12,7 +12,8 @@ from pathlib import Path
 
 from whisper_dictation.meeting_audio import MeetingRecorder, recover_recording
 from whisper_dictation.child_job import ChildJob
-from whisper_dictation.processes import worker_alive
+from whisper_dictation import processes
+from whisper_dictation.processes import record_worker_alive
 from whisper_dictation.recording_store import ACTIVE_STATUSES, RecordingStore
 from whisper_dictation.settings import AppConfig, recordings_dir
 
@@ -58,7 +59,7 @@ class MeetingService:
             return True
         # Jobs started by agents (pace-cli) run in their own worker; restarting to
         # update would interrupt them and lock the installation's binaries.
-        return any(r["status"] == "queued" or (r["status"] in ACTIVE_STATUSES and worker_alive(r.get("worker_pid")))
+        return any(r["status"] == "queued" or (r["status"] in ACTIVE_STATUSES and record_worker_alive(r))
                    for r in self.store.list())
 
     def start(self, suspended: bool = False) -> None:
@@ -77,10 +78,12 @@ class MeetingService:
                 except Exception as exc:
                     self.store.update(identifier, status="interrupted", error=f"Gravação interrompida: {exc}")
             elif row["status"] in ACTIVE_STATUSES:
-                if worker_alive(row.get("worker_pid")):
+                if record_worker_alive(row):
                     continue  # still processed by an agent's worker; never run it twice
                 status = "cancelled" if (self.store.directory(identifier) / "cancel.request").exists() else "queued"
-                self.store.update(identifier, status=status, error="", progress=0)
+                # Compare-and-set on the owner: an agent may be claiming this job right now.
+                self.store.transition(identifier, row["status"], status, expect={"worker_pid": row.get("worker_pid")},
+                                      error="", progress=0)
             elif row["status"] in {"new", "starting"}:
                 self.store.update(identifier, status="interrupted", error="A inicialização da gravação foi interrompida.")
 
@@ -218,7 +221,8 @@ class MeetingService:
         if (directory / "cancel.request").exists():
             self.store.transition(row["id"], "queued", "cancelled")
             return
-        if not self.store.transition(row["id"], "queued", "processing", progress=0, error="", worker_pid=None):
+        # Claim with a live owner (this tray) so an agent never sees an ownerless job.
+        if not self.store.transition(row["id"], "queued", "processing", progress=0, error="", **processes.owner()):
             return
         self._worker_id = row["id"]
         try:
@@ -230,7 +234,7 @@ class MeetingService:
                     "--store-root", str(self.root), "--config-path", str(snapshot)),
                     stdout=log, stderr=log, creationflags=0x08000000 if os.name == "nt" else 0)
                 self._worker_job.add(self._worker.pid)
-                self.store.update(row["id"], worker_pid=self._worker.pid)
+                self.store.update(row["id"], **processes.owner(self._worker.pid))
                 self._worker_progress = None
                 self._worker_last_progress = time.monotonic()
         except Exception as exc:

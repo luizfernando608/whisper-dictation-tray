@@ -17,7 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from whisper_dictation.processes import worker_alive
+from whisper_dictation import processes
+from whisper_dictation.processes import record_worker_alive
 from whisper_dictation.recording_store import ACTIVE_STATUSES, RecordingStore
 
 MEDIA_EXTENSIONS = frozenset({".wav", ".mp3", ".m4a", ".ogg", ".oga", ".opus", ".flac", ".aac", ".wma",
@@ -170,17 +171,18 @@ def start(context: Context, source: str | os.PathLike, *, speakers=None, min_spe
             if row["status"] in ACTIVE_STATUSES | {"queued"}:
                 return ensure_running(context, row["id"]), True
 
+    # Owned by this process until the worker starts, so the tray never requeues it meanwhile.
     record = store.create(title or path.stem, "import", source_path=str(path), status="processing",
                           requested_by="agent", source_sha256=digest, job_options=options,
                           num_speakers=speakers, min_speakers=min_speakers, max_speakers=max_speakers,
-                          stage="Na fila")
+                          stage="Na fila", **processes.owner())
     try:
         config.save(store.directory(record["id"]) / "worker_config.json")
         pid = _spawn_worker(context, store, record["id"])
     except Exception as exc:
         store.update(record["id"], status="failed", error=f"Não foi possível iniciar o processamento: {exc}")
         raise JobError(f"Não foi possível iniciar o processamento: {exc}", code="worker_failed") from exc
-    return store.update(record["id"], worker_pid=pid), False
+    return store.update(record["id"], **processes.owner(pid)), False
 
 
 def get(context: Context, recording_id: str) -> dict:
@@ -200,31 +202,34 @@ def ensure_running(context: Context, recording_id: str) -> dict:
     """
     record = get(context, recording_id)
     status = record["status"]
-    if status in ACTIVE_STATUSES - {"resuming"} and worker_alive(record.get("worker_pid")):
+    if status not in ACTIVE_STATUSES | {"queued"}:
         return record
+    if status in ACTIVE_STATUSES and record_worker_alive(record):
+        return record  # includes "resuming" while its owner is still starting the worker
     if status == "queued":
         from whisper_dictation.single_instance import probe
         if probe():
             return record
-    if status not in (ACTIVE_STATUSES | {"queued"}) - {"resuming"}:
-        return record
     store = context.store()
+    seen_owner = {"worker_pid": record.get("worker_pid")}
     attempts = int(record.get("resume_count") or 0)
     if attempts >= MAX_RESUMES:
         detail = _log_tail(store.directory(recording_id) / "worker.log")
-        store.transition(recording_id, status, "failed", stage="Falha",
+        store.transition(recording_id, status, "failed", expect=seen_owner, stage="Falha",
                          error="O processamento parou sem concluir." + (f" Último registro: {detail}" if detail else ""))
         return store.get(recording_id)
-    if not store.transition(recording_id, status, "resuming", stage="Retomando", resume_count=attempts + 1):
+    # Compare-and-set on the owner we saw dead: never steal a job someone just claimed.
+    if not store.transition(recording_id, status, "resuming", expect=seen_owner, stage="Retomando",
+                            resume_count=attempts + 1, **processes.owner()):
         return store.get(recording_id)
     try:
         snapshot = store.directory(recording_id) / "worker_config.json"
         if not snapshot.is_file():
-            context.config().save(snapshot)
+            context.config().save(snapshot)  # the worker re-applies the job's own options
         pid = _spawn_worker(context, store, recording_id)
     except Exception as exc:
         return store.update(recording_id, status="failed", error=f"Não foi possível retomar: {exc}")
-    return store.update(recording_id, status="processing", worker_pid=pid)
+    return store.update(recording_id, status="processing", **processes.owner(pid))
 
 
 def _log_tail(path: Path, limit: int = 300) -> str:
@@ -262,10 +267,15 @@ def cancel(context: Context, recording_id: str) -> dict:
     record = get(context, recording_id)
     if record["status"] in DONE_STATUSES:
         return record
+    if record["status"] not in ACTIVE_STATUSES | {"queued"}:
+        # e.g. a meeting still being recorded in the tray: only the tray may stop it.
+        raise JobError(f"Esta gravação não pode ser cancelada agora ({record['status']}).",
+                       "Encerre a reunião pelo PACE.", exit_code=2, code="not_cancellable")
     store = context.store()
     (store.directory(recording_id) / "cancel.request").write_text("agent", encoding="utf-8")
-    if not worker_alive(record.get("worker_pid")):
-        store.transition(recording_id, record["status"], "cancelled", stage="Cancelado", error="")
+    if record["status"] == "queued" or not record_worker_alive(record):
+        store.transition(recording_id, record["status"], "cancelled", expect={"worker_pid": record.get("worker_pid")},
+                         stage="Cancelado", error="")
     return store.get(recording_id)
 
 

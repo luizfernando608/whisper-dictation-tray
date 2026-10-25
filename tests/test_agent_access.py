@@ -13,7 +13,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import main
-from whisper_dictation import agent_jobs, agents, cli, mcp_server, update_helper, updater
+from whisper_dictation import agent_jobs, agents, cli, mcp_server, processes, update_helper, updater
+from whisper_dictation.meeting_processing import apply_job_options
 from whisper_dictation.agent_jobs import Context, JobError
 from whisper_dictation.agent_skill import MARKER
 from whisper_dictation.meeting_service import MeetingService
@@ -60,7 +61,7 @@ class JobsBase(unittest.TestCase):
         key = patch.object(agent_jobs, "key_configured", return_value=True)
         self.key = key.start()
         self.addCleanup(key.stop)
-        alive = patch.object(agent_jobs, "worker_alive", return_value=True)
+        alive = patch.object(agent_jobs, "record_worker_alive", return_value=True)
         self.alive = alive.start()
         self.addCleanup(alive.stop)
 
@@ -470,7 +471,7 @@ class TrayCoexistenceTests(unittest.TestCase):
     def test_tray_does_not_requeue_job_of_a_live_agent_worker(self):
         alive = self.service.store.create("agente", "import", status="processing", worker_pid=111)
         dead = self.service.store.create("morto", "import", status="diarizing", worker_pid=222)
-        with patch("whisper_dictation.meeting_service.worker_alive", side_effect=lambda pid: pid == 111):
+        with patch("whisper_dictation.meeting_service.record_worker_alive", side_effect=lambda row: row.get("worker_pid") == 111):
             self.service._recover()
             self.assertTrue(self.service.busy)
         self.assertEqual(self.service.store.get(alive["id"])["status"], "processing")
@@ -479,7 +480,7 @@ class TrayCoexistenceTests(unittest.TestCase):
     def test_finished_or_dead_agent_jobs_do_not_block_updates(self):
         self.service.store.create("pronto", "import", status="ready", worker_pid=111)
         self.service.store.create("morto", "import", status="processing", worker_pid=222)
-        with patch("whisper_dictation.meeting_service.worker_alive", return_value=False):
+        with patch("whisper_dictation.meeting_service.record_worker_alive", return_value=False):
             self.assertFalse(self.service.busy)
 
     def test_tray_records_its_own_worker_pid(self):
@@ -556,6 +557,35 @@ class UpdateSafetyTests(unittest.TestCase):
         launch.assert_called_once_with(target)
         self.assertIn("adiada", json.loads((path.parent / "result.json").read_text(encoding="utf-8"))["error"])
 
+    def test_processes_started_during_install_are_closed_before_restore(self):
+        target, path = self.make_plan()
+        events = []
+        scans = iter([[], [], [(601, target / "pace-cli.exe")], []])
+        real_restore = update_helper._restore
+
+        def install(command, **options):
+            events.append("install")
+            (target / "Pace.exe").write_bytes(b"half new")
+            return MagicMock(returncode=5)
+
+        def restore(target_, backup):
+            events.append("restore")
+            if events.count("restore") == 1:
+                raise OSError("runtime locked")
+            return real_restore(target_, backup)
+
+        with patch.object(update_helper, "wait_for_process_exit"), \
+             patch.object(update_helper.processes, "processes_in", side_effect=lambda t: next(scans, [])), \
+             patch.object(update_helper.processes, "terminate", side_effect=lambda pid: events.append(f"kill {pid}") or True), \
+             patch.object(update_helper.time, "sleep"), \
+             patch.object(update_helper.subprocess, "run", side_effect=install), \
+             patch.object(update_helper, "_restore", side_effect=restore), \
+             patch.object(update_helper, "_launch") as launch:
+            self.assertEqual(update_helper.apply_update(path), 1)
+        self.assertEqual(events, ["install", "kill 601", "restore", "restore"])
+        self.assertEqual((target / "Pace.exe").read_bytes(), b"old binary")
+        launch.assert_called_once_with(target)
+
     def test_rollback_restores_cli_and_removes_cli_absent_before(self):
         for with_cli in (True, False):
             with self.subTest(with_cli=with_cli):
@@ -579,6 +609,155 @@ class UpdateSafetyTests(unittest.TestCase):
                 else:
                     self.assertFalse((target / "pace-cli.exe").exists())
                 self.assertEqual((target / "config.json").read_bytes(), b"persistent data")
+
+
+class ReviewFindingTests(JobsBase):
+    """Regressions for the independent review of the agent access feature."""
+
+    def test_worker_reapplies_local_only_and_language_from_the_job(self):
+        config = AppConfig(transcription_provider="groq", language="auto")
+        apply_job_options(config, {"requested_by": "agent", "job_options": {"provider": "local", "language": "pt"}})
+        self.assertEqual((config.transcription_provider, config.language), ("local", "pt"))
+        untouched = AppConfig(transcription_provider="groq")
+        apply_job_options(untouched, {"requested_by": "app", "job_options": {"provider": "local"}})
+        self.assertEqual(untouched.transcription_provider, "groq")
+
+    def test_process_recording_applies_job_options_even_with_tray_snapshot(self):
+        from whisper_dictation import meeting_processing
+        record, _ = agent_jobs.start(self.context, self.audio, local=True)
+        store = self.context.store()
+        directory = store.directory(record["id"])
+        AppConfig(transcription_provider="groq").save(directory / "worker_config.json")  # tray overwrote it
+        (directory / "audio.wav").write_bytes(b"x")
+        store.update(record["id"], audio_path=str(directory / "audio.wav"))
+        seen = {}
+
+        def stop(audio, directory_, config, *args, **kwargs):
+            seen["provider"] = config.transcription_provider
+            raise meeting_processing.ProcessingCancelled()
+
+        with patch.object(meeting_processing, "transcribe_recording", side_effect=stop):
+            meeting_processing.process_recording(store.root, record["id"], directory / "worker_config.json")
+        self.assertEqual(seen["provider"], "local")
+
+    def test_transition_compares_the_owner(self):
+        store = self.context.store()
+        row = store.create("x", "import", status="processing", worker_pid=10)
+        self.assertFalse(store.transition(row["id"], "processing", "resuming", expect={"worker_pid": 99}))
+        self.assertTrue(store.transition(row["id"], "processing", "resuming", expect={"worker_pid": 10}, worker_pid=11))
+        self.assertEqual(store.get(row["id"])["worker_pid"], 11)
+
+    def test_jobs_are_owned_from_creation_and_resume_does_not_steal(self):
+        def spawn(context, store, recording_id):
+            self.assertEqual(store.get(recording_id)["worker_pid"], os.getpid())
+            return 4242
+
+        with patch.object(agent_jobs, "_spawn_worker", side_effect=spawn):
+            record, _ = agent_jobs.start(self.context, self.audio)
+        self.assertEqual(record["worker_pid"], 4242)
+        self.alive.return_value = False
+        store = self.context.store()
+        real_transition = store.transition
+
+        def claimed_meanwhile(recording_id, *args, **kwargs):
+            store.update(recording_id, worker_pid=777)  # the tray claimed it a moment ago
+            return real_transition(recording_id, *args, **kwargs)
+
+        with patch.object(agent_jobs.Context, "store", return_value=store), \
+             patch.object(store, "transition", side_effect=claimed_meanwhile):
+            current = agent_jobs.ensure_running(self.context, record["id"])
+        self.assertEqual(current["worker_pid"], 777)
+        self.assertEqual(current["status"], "processing")
+        self.assertEqual(self.spawned, [])
+
+    def test_stuck_resuming_with_dead_owner_is_resumed(self):
+        record, _ = agent_jobs.start(self.context, self.audio)
+        self.context.store().update(record["id"], status="resuming", worker_pid=55555)
+        self.alive.return_value = False
+        self.assertEqual(agent_jobs.ensure_running(self.context, record["id"])["status"], "processing")
+
+    def make_service(self, name):
+        root = self.root / name
+        root.mkdir()
+        config = AppConfig(meeting_storage_dir=str(root / "library"))
+        config.save(root / "config.json")
+        service = MeetingService(config, root, root / "config.json")
+        self.addCleanup(service.shutdown)
+        return service
+
+    def test_tray_claims_with_its_own_pid_before_starting_the_worker(self):
+        service = self.make_service("tray")
+        row = service.store.create("fila", "import", status="queued")
+        process = MagicMock(pid=31337)
+        process.poll.return_value = None
+
+        def popen(*args, **kwargs):
+            self.assertEqual(service.store.get(row["id"])["worker_pid"], os.getpid())
+            return process
+
+        with patch("whisper_dictation.meeting_service.subprocess.Popen", side_effect=popen), \
+             patch("whisper_dictation.meeting_service.ChildJob"):
+            service._advance_queue()
+        self.assertEqual(service.store.get(row["id"])["worker_pid"], 31337)
+        service._worker = None
+
+    def test_tray_recovery_does_not_overwrite_a_fresh_claim(self):
+        service = self.make_service("tray2")
+        row = service.store.create("agente", "import", status="processing", worker_pid=1)
+        real = service.store.transition
+
+        def claim_first(recording_id, *args, **kwargs):
+            service.store.update(recording_id, status="resuming", worker_pid=2)
+            return real(recording_id, *args, **kwargs)
+
+        with patch("whisper_dictation.meeting_service.record_worker_alive", return_value=False), \
+             patch.object(service.store, "transition", side_effect=claim_first):
+            service._recover()
+        self.assertEqual(service.store.get(row["id"])["status"], "resuming")
+
+    def test_reused_pid_is_not_a_live_worker(self):
+        frozen = patch.object(processes.sys, "frozen", True, create=True)
+        with frozen, patch.object(processes, "process_image", return_value=Path(r"C:\Pace\Pace.exe")), \
+             patch.object(processes, "creation_time", return_value=2000.0):
+            self.assertTrue(processes.worker_alive(5, 1999.5))
+            self.assertFalse(processes.worker_alive(5, 1000.0))
+            self.assertTrue(processes.worker_alive(5))
+        with patch.object(processes.sys, "frozen", True, create=True), \
+             patch.object(processes, "process_image", return_value=Path(r"C:\Windows\notepad.exe")):
+            self.assertFalse(processes.worker_alive(5))
+        with patch.object(processes.sys, "frozen", True, create=True), \
+             patch.object(processes, "process_image", return_value=Path(r"C:\Pace\pace-cli.exe")), \
+             patch.object(processes, "creation_time", return_value=None):
+            self.assertTrue(processes.worker_alive(5, 1.0))
+        if os.name == "nt":
+            self.assertAlmostEqual(processes.owner()["worker_started"], processes.creation_time(os.getpid()))
+            self.assertTrue(processes.record_worker_alive(processes.owner()))
+
+    def test_cancel_refuses_recordings_owned_by_the_tray(self):
+        row = self.context.store().create("Reunião", "meeting", status="recording")
+        with self.assertRaises(JobError) as caught:
+            agent_jobs.cancel(self.context, row["id"])
+        self.assertEqual(caught.exception.code, "not_cancellable")
+        self.assertEqual(self.context.store().get(row["id"])["status"], "recording")
+        self.assertFalse((self.context.store().directory(row["id"]) / "cancel.request").exists())
+
+
+class McpRobustnessTests(JobsBase):
+    def test_malformed_params_never_stop_the_server(self):
+        output = io.BytesIO()
+        server = mcp_server.Server(self.context, output)
+        server.run(io.BytesIO(
+            b'{"jsonrpc":"2.0","method":"notifications/cancelled","params":[1]}\n'
+            b'{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":{"a":1}}}\n'
+            b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":[1]}\n'
+            b'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"pace_status","_meta":[1]}}\n'
+            b'{"jsonrpc":"2.0","id":3,"method":"ping"}\n'))
+        for thread in server._threads:
+            thread.join(30)
+        replies = {m["id"]: m for m in map(json.loads, output.getvalue().splitlines()) if "id" in m}
+        self.assertEqual(replies[1]["error"]["code"], -32602)
+        self.assertIn("result", replies[2])
+        self.assertEqual(replies[3]["result"], {})
 
 
 class InstallerDefinitionTests(unittest.TestCase):
