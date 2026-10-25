@@ -40,6 +40,41 @@ milissegundos, já existente antes; o resultado é o mesmo, apenas com custo de 
 Um teste de interface (`test_ctrl_f_can_be_captured`) falhou uma vez na suíte completa e passa sozinho
 (instabilidade de atalho/GUI, não relacionada).
 
-## Laboratório (Windows Sandbox)
+## Laboratório (Windows Sandbox) — 25/10/2026
 
-Pendente: requer o recurso Windows Sandbox ativado (administrador + reinício).
+Candidato 1.6.0 do commit c3f0e7f (árvore limpa); 1.6.1 de teste do mesmo código (não publicar); base
+1.5.2 = instalador publicado (`Output/v1.5.2`). GitHub simulado dentro da sandbox; sem chaves reais.
+Comando: `scripts/lab/run_lab.ps1 -Candidate Output/Pace_Installer.exe -Next Output/lab/1.6.1/Pace_Installer.exe`.
+
+Resultado final (execução 5): **16/16**.
+
+| Verificação | Resultado |
+|---|---|
+| Instala 1.5.2 do zero e abre na bandeja | ok |
+| 1.5.2 → 1.6.0 pelo fluxo real do app (download, auxiliar, confirmação) | ok |
+| Configurações, `.env` com chave e biblioteca preservados | ok |
+| `pace-cli` (`--version`, `doctor` com chave detectada) | ok |
+| Conectar aos agentes (Claude Code, Claude Desktop, Codex em perfis falsos) | ok |
+| Servidor MCP: handshake, ferramentas, `pace_status` | ok |
+| Transcrição offline de áudio .ogg pelo `pace-cli` e item na biblioteca | ok (25 s) |
+| 1.6.0 → 1.6.1 com servidor MCP de agente aberto (encerrado pelo auxiliar) | ok |
+| Dados preservados 1.6.0 → 1.6.1 | ok |
+| Skill e MCP dos agentes atualizados para 1.6.1 sozinhos | ok |
+| Instalador com falha: rollback restaura binários, 1.6.1 reabre, `pace-cli` e dados intactos | ok |
+| Desinstalação: código 0, remove MCP/skill, preserva o resto das configs | ok |
+
+O que as execuções anteriores revelaram:
+
+- **Bug real corrigido (c3f0e7f):** num Windows limpo, clientes .NET enviam a primeira mensagem MCP com
+  BOM UTF-8; o servidor respondia "Parse error". Agora o BOM é ignorado (teste de regressão).
+- **Comportamento da 1.5.2 publicada:** "Reiniciar para atualizar" pedido enquanto o download da
+  verificação de inicialização ainda corre é ignorado sem aviso (trava interna); a atualização acontece no
+  próximo pedido. Não afeta quem clica após o aviso "pronta"; não é possível mudar a 1.5.2. Melhoria
+  possível numa 1.6.x: enfileirar o pedido em vez de descartá-lo.
+- **Sobra de download:** se o PACE fecha no meio do download, o `.partial` (≈400 MB) fica no cache de
+  atualizações (comportamento já existente). Melhoria possível: limpar `.partial` antigos.
+- Correções no próprio laboratório: alias `cli` do PowerShell, espera pelo `result.json` do auxiliar,
+  pedido de atualização só após o download, `stderr` do `pace-cli`/MCP guardados como evidência.
+
+Limites: um único Windows (o do host, na sandbox); não cobre Windows 10, CPU sem AVX2 nem usuário sem
+privilégio de administrador (o usuário da sandbox é administrador; o instalador não pede elevação).
