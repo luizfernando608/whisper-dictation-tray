@@ -12,7 +12,9 @@ from pathlib import Path
 
 from whisper_dictation.meeting_audio import MeetingRecorder, recover_recording
 from whisper_dictation.child_job import ChildJob
-from whisper_dictation.recording_store import RecordingStore
+from whisper_dictation import processes
+from whisper_dictation.processes import record_worker_alive
+from whisper_dictation.recording_store import ACTIVE_STATUSES, RecordingStore
 from whisper_dictation.settings import AppConfig, recordings_dir
 
 
@@ -53,7 +55,27 @@ class MeetingService:
 
     @property
     def busy(self) -> bool:
-        return self.active or self._finalizing or self._worker is not None or any(r["status"] == "queued" for r in self.store.list())
+        if self.active or self._finalizing or self._worker is not None:
+            return True
+        # Jobs started by agents (pace-cli) run in their own worker; restarting to
+        # update would interrupt them and lock the installation's binaries.
+        return any(r["status"] == "queued" or (r["status"] in ACTIVE_STATUSES and self._owner_alive(r))
+                   for r in self.store.list())
+
+    def _still_mine(self, row: dict) -> dict | None:
+        """CAS condition for the tray's own status writes: the row is owned by our
+        worker (or by nobody, as rows from older versions); None if an agent took it."""
+        owner = row.get("worker_pid")
+        if owner is not None and self._worker is not None and owner != self._worker.pid:
+            return None
+        return {"worker_pid": owner}
+
+    def _owner_alive(self, row: dict) -> bool:
+        """Rows claimed by this tray are alive only while it really runs their worker;
+        a failed store write must not leave them looking owned (and the tray busy)."""
+        if row.get("worker_pid") == os.getpid():
+            return self._worker_id == row["id"]
+        return record_worker_alive(row)
 
     def start(self, suspended: bool = False) -> None:
         self._queue_suspended = suspended
@@ -70,9 +92,13 @@ class MeetingService:
                     self.store.update(identifier, audio_path=str(audio), status="queued", error="", progress=0)
                 except Exception as exc:
                     self.store.update(identifier, status="interrupted", error=f"Gravação interrompida: {exc}")
-            elif row["status"] in {"transcribing", "diarizing", "importing", "processing"}:
+            elif row["status"] in ACTIVE_STATUSES:
+                if self._owner_alive(row):
+                    continue  # still processed by an agent's worker; never run it twice
                 status = "cancelled" if (self.store.directory(identifier) / "cancel.request").exists() else "queued"
-                self.store.update(identifier, status=status, error="", progress=0)
+                # Compare-and-set on the owner: an agent may be claiming this job right now.
+                self.store.transition(identifier, row["status"], status, expect={"worker_pid": row.get("worker_pid")},
+                                      error="", progress=0)
             elif row["status"] in {"new", "starting"}:
                 self.store.update(identifier, status="interrupted", error="A inicialização da gravação foi interrompida.")
 
@@ -171,11 +197,15 @@ class MeetingService:
                 self._worker_job.close()
                 self._worker.terminate()
                 self._worker.wait(timeout=10)
-                if not row.get("backend_override"):
-                    self.store.update(self._worker_id, status="queued", backend_override="cpu", progress=0,
-                                      fallback_reason="Processamento sem progresso por 20 minutos; retomando em CPU.")
+                mine = self._still_mine(row)  # never overwrite a job an agent took over
+                if mine is None:
+                    pass
+                elif not row.get("backend_override"):
+                    self.store.transition(self._worker_id, ACTIVE_STATUSES, "queued", expect=mine, backend_override="cpu",
+                                          progress=0, fallback_reason="Processamento sem progresso por 20 minutos; retomando em CPU.")
                 else:
-                    self.store.update(self._worker_id, status="failed", error="Processamento não respondeu em CPU. O áudio e os checkpoints foram preservados.")
+                    self.store.transition(self._worker_id, ACTIVE_STATUSES, "failed", expect=mine,
+                                          error="Processamento não respondeu em CPU. O áudio e os checkpoints foram preservados.")
                 self._worker = None
                 self._worker_id = None
                 self._worker_job = None
@@ -190,9 +220,11 @@ class MeetingService:
             if code is None:
                 return
             row = self.store.get(self._worker_id)
-            if row and row["status"] not in {"ready", "failed", "cancelled"}:
-                self.store.update(self._worker_id, status="cancelled" if cancel.exists() else "failed",
-                                  error="Processamento cancelado." if cancel.exists() else f"Processamento terminou inesperadamente ({code}).")
+            mine = self._still_mine(row) if row else None
+            if row and mine is not None and row["status"] not in {"ready", "failed", "cancelled"}:
+                self.store.transition(self._worker_id, row["status"], "cancelled" if cancel.exists() else "failed",
+                                      expect=mine,
+                                      error="Processamento cancelado." if cancel.exists() else f"Processamento terminou inesperadamente ({code}).")
             self._worker = None
             if self._worker_job:
                 self._worker_job.close()
@@ -210,7 +242,8 @@ class MeetingService:
         if (directory / "cancel.request").exists():
             self.store.transition(row["id"], "queued", "cancelled")
             return
-        if not self.store.transition(row["id"], "queued", "processing", progress=0, error=""):
+        # Claim with a live owner (this tray) so an agent never sees an ownerless job.
+        if not self.store.transition(row["id"], "queued", "processing", progress=0, error="", **processes.owner()):
             return
         self._worker_id = row["id"]
         try:
@@ -222,6 +255,7 @@ class MeetingService:
                     "--store-root", str(self.root), "--config-path", str(snapshot)),
                     stdout=log, stderr=log, creationflags=0x08000000 if os.name == "nt" else 0)
                 self._worker_job.add(self._worker.pid)
+                self.store.update(row["id"], **processes.owner(self._worker.pid))
                 self._worker_progress = None
                 self._worker_last_progress = time.monotonic()
         except Exception as exc:
@@ -244,7 +278,9 @@ class MeetingService:
                     self._worker_job.close()
                 self._worker.terminate()
                 self._worker.wait(timeout=10)
-                self.store.update(self._worker_id, status="queued", error="", progress=0)
+                mine = self._still_mine(self.store.get(self._worker_id))
+                if mine is not None:
+                    self.store.transition(self._worker_id, ACTIVE_STATUSES, "queued", expect=mine, error="", progress=0)
             self._worker = None
             self._write_runtime()
         if join and self._thread and self._thread is not threading.current_thread():

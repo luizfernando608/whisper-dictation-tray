@@ -1,5 +1,15 @@
 # Abertura no Windows
 
+## Instalação ativa desde 23/10/2026
+
+Após pedido para deixar somente o oficial, a instalação real em `C:/Users/ziull/AppData/Local/Pace` foi atualizada de 1.4.0 para o pacote público 1.5.2 (SHA do instalador b0573e13d606c835e0be6b75dfd5d1f30f25a1c575b682711f6920ded713b18f; EXE 2af16b5adb5790aabf12741fd4fb7dca67776ad1ecdd460d295a1f7066055274). A prévia foi encerrada e não é mais o alvo ativo. Config/env em uso foram preservados no oficial; biblioteca e modelos continuam nos caminhos existentes.
+
+Busca do Windows (`Get-StartApps`) confirmou uma única entrada **PACE**, AppID `C:/Users/ziull/AppData/Local/Pace/Pace.exe`. Permanecem somente atalhos PACE no menu Iniciar e desktop com `--recordings`, e startup sem argumentos. Sete duplicatas foram removidas após backup, incluindo PACE Prévia e um atalho com nome mojibake apontando ao teste antigo de rollback. Registro HKCU Pace_is1 agora corresponde ao oficial 1.5.2; abertura real pelo atalho, repetição e alternância biblioteca/configurações no mesmo HWND passaram.
+
+A biblioteca atual é `C:/Users/ziull/AppData/Local/PACE-Preview-Data/recordings`: três registros no SQLite e 32 arquivos WAV, todos preservados por hash, assim como resultados/config/env. O `runtime.json` dessa biblioteca confirmou PID do tray oficial, não apenas uma inspeção externa do banco. Não confundir essa pasta RAW atual com a cópia antiga de 20 WAVs sob MSIX LocalCache. Diretórios antigos e dados não foram apagados; backups/evidência em `C:/Users/ziull/Documents/pace-official-consolidation-20261023/report.json`, passed. Testes futuros devem restaurar esta instalação oficial/atalhos ao terminar e não deixar prévias na busca.
+
+## Histórico anterior
+
 `main.py:main()` sem argumentos inicia apenas a bandeja; se a mesma instalação já estiver aberta, sai sem abrir janela. Atalhos interativos precisam de `--recordings` ou `--settings`. `installer.iss:[Icons]` e `[Run]` usam `--recordings` nos atalhos principais e na abertura após instalar; `[Icons]` mantém a inicialização automática sem argumentos.
 
 O canal IPC é único entre instalações. Uma instalação antiga iniciada pelo Windows impede a prévia de assumir os atalhos globais; a prévia detecta o conflito e pede para fechar a antiga. No computador de desenvolvimento, atalhos de menu Iniciar/configurações/gravações e inicialização foram alinhados à prévia existente em 2026-10-20, com cópia dos atalhos anteriores em dados locais de backup. A versão instalada antiga foi encerrada via IPC e a biblioteca da prévia foi aberta pelo atalho principal para verificar o resultado. Configuração e gravações não foram migradas.

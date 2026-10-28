@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "1.5.2"
+  #define AppVersion "1.6.0"
 #endif
 
 [Setup]
@@ -19,7 +19,7 @@ DisableDirPage=auto
 DisableProgramGroupPage=auto
 UsePreviousAppDir=yes
 CloseApplications=yes
-CloseApplicationsFilter=Pace.exe,WhisperDictationTray.exe
+CloseApplicationsFilter=Pace.exe,pace-cli.exe,WhisperDictationTray.exe
 RestartApplications=no
 Compression=lzma2
 SolidCompression=yes
@@ -29,6 +29,7 @@ PrivilegesRequired=lowest
 
 [InstallDelete]
 Type: files; Name: "{app}\Pace.exe"
+Type: files; Name: "{app}\pace-cli.exe"
 Type: files; Name: "{app}\WhisperDictationTray.exe"
 Type: filesandordirs; Name: "{app}\_internal"
 Type: files; Name: "{userdesktop}\Whisper Dictation — Configurações.lnk"
@@ -48,6 +49,10 @@ Name: "{userdesktop}\PACE"; Filename: "{app}\Pace.exe"; Parameters: "--recording
 Name: "{userdesktop}\PACE — Configurações"; Filename: "{app}\Pace.exe"; Parameters: "--settings"
 Name: "{userdesktop}\PACE — Gravações"; Filename: "{app}\Pace.exe"; Parameters: "--recordings"
 Name: "{userstartup}\PACE"; Filename: "{app}\Pace.exe"
+
+[UninstallRun]
+; Remove only the MCP entries and skills that PACE added to AI agents.
+Filename: "{app}\pace-cli.exe"; Parameters: "agents disconnect --all --quiet"; Flags: runhidden waituntilterminated skipifdoesntexist; RunOnceId: "PaceAgentsDisconnect"
 
 [Run]
 Filename: "{app}\Pace.exe"; Parameters: "--recordings"; Description: "Launch PACE"; Flags: nowait postinstall skipifsilent

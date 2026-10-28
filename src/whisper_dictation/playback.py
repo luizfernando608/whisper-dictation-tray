@@ -2,42 +2,12 @@
 from __future__ import annotations
 
 import threading
-import re
 from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
 from whisper_dictation.wav_reader import PCM16Reader
-
-
-def timestamp(seconds: float, milliseconds: bool = False) -> str:
-    value = max(0, round(seconds * 1000))
-    hours, value = divmod(value, 3600000)
-    minutes, value = divmod(value, 60000)
-    seconds, millis = divmod(value, 1000)
-    text = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-    return text + f",{millis:03d}" if milliseconds else text
-
-
-def speaker_label(speaker: str | None) -> str:
-    if not speaker:
-        return "Falante não identificado"
-    match = re.fullmatch(r"SPEAKER_(\d+)", speaker, re.IGNORECASE)
-    return f"Falante {int(match[1]) + 1}" if match else speaker
-
-
-def transcript_text(result: dict, names: dict | None = None, srt: bool = False) -> str:
-    names = names or {}
-    lines = []
-    for index, segment in enumerate(result.get("segments", []), 1):
-        speaker = segment.get("speaker")
-        label = names.get(speaker, speaker_label(speaker))
-        text = segment.get("text", "").strip()
-        if srt:
-            lines.append(f"{index}\n{timestamp(segment['start'], True)} --> {timestamp(segment['end'], True)}\n{label}: {text}\n")
-        else:
-            lines.append(f"[{timestamp(segment['start'])}] {label}: {text}")
-    return "\n".join(lines) if lines else result.get("text", "")
+from whisper_dictation.transcript_format import speaker_label, timestamp, transcript_text  # noqa: F401  (re-exported)
 
 
 class WavePlayer:

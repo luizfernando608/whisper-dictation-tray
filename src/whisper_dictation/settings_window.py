@@ -124,6 +124,8 @@ class SettingsContext:
     run_update: Callable[[object], None] | None = None
     can_save: Callable[[], bool] | None = None
     commit_settings: Callable[[AppConfig, dict[str, str]], bool] | None = None
+    # "status" | "connect" | "disconnect" -> human-readable report (runs off the UI thread)
+    agents_action: Callable[[str], str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -852,6 +854,60 @@ def _build_about_tab(tab, context: SettingsContext, heading_font, muted, owner=N
         ctk.CTkButton(
             tools, text="Copiar transcrição", width=150, command=context.copy_last_transcript, **secondary
         ).pack(side="left")
+
+    if context.agents_action:
+        _build_agents_section(tab, context, heading_font, muted, secondary, owner=owner)
+
+
+def _build_agents_section(tab, context: SettingsContext, heading_font, muted, secondary, owner=None) -> None:
+    """Connect PACE to Claude, Codex and Cursor so they transcribe recordings by themselves."""
+    scheduler = owner if owner is not None else tab
+    ctk.CTkLabel(tab, text="Agentes de IA", font=heading_font, text_color=COLOR_TEXT_MAIN).pack(
+        anchor="w", padx=4, pady=(22, 2))
+    ctk.CTkLabel(
+        tab, justify="left", wraplength=520, text_color=muted,
+        text="Deixa o Claude, o Codex e o Cursor deste computador usarem o PACE sozinhos para transcrever "
+             "e identificar falantes de reuniões, vídeos e áudios do WhatsApp. A chave continua só no PACE.",
+    ).pack(anchor="w", padx=4, pady=(0, 6))
+    status = ctk.CTkLabel(tab, text="", justify="left", wraplength=520, text_color=COLOR_TEXT_MUTED)
+    row = ctk.CTkFrame(tab, fg_color="transparent")
+    row.pack(anchor="w", padx=4, fill="x")
+    status.pack(anchor="w", padx=4, pady=(6, 0))
+    buttons = []
+
+    def run(action: str, busy_text: str) -> None:
+        for button in buttons:
+            button.configure(state="disabled")
+        status.configure(text=busy_text)
+        responses = queue.Queue()
+
+        def worker() -> None:
+            try:
+                responses.put(context.agents_action(action))  # type: ignore[misc]
+            except Exception as exc:
+                responses.put(f"Não foi possível concluir: {exc}")
+
+        def finish() -> None:
+            try:
+                text = responses.get_nowait()
+            except queue.Empty:
+                scheduler.after(150, finish)
+                return
+            for button in buttons:
+                button.configure(state="normal")
+            status.configure(text=text)
+
+        threading.Thread(target=worker, name="AgentsAction", daemon=True).start()
+        scheduler.after(150, finish)
+
+    buttons.append(ctk.CTkButton(row, text="Conectar aos agentes de IA", width=210, fg_color=COLOR_ACCENT,
+                                 hover_color=COLOR_ACCENT_HOVER, corner_radius=6,
+                                 command=lambda: run("connect", "Conectando…")))
+    buttons.append(ctk.CTkButton(row, text="Desconectar", width=110, command=lambda: run("disconnect", "Desconectando…"),
+                                 **secondary))
+    for button in buttons:
+        button.pack(side="left", padx=(0, 8))
+    run("status", "Verificando agentes instalados…")
 
 
 def _wire_update_button(parent, button, status, context: SettingsContext, owner=None) -> None:

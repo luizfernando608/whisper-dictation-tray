@@ -12,8 +12,10 @@ from datetime import datetime, timezone
 import uuid
 
 
-BUSY_STATUSES = frozenset({"new", "starting", "recording", "paused", "importing", "queued", "transcribing", "diarizing", "finalizing", "preparing", "processing", "cancelling"})
-_FIELDS = frozenset({"title", "origin", "duration", "status", "progress", "error", "audio_path", "result_path", "partial_result_path", "stage", "transcription_warning", "backend", "backend_override", "speaker_names", "source_path", "worker_pid", "fallback_reason", "num_speakers", "min_speakers", "max_speakers"})
+BUSY_STATUSES = frozenset({"new", "starting", "recording", "paused", "importing", "queued", "transcribing", "diarizing", "finalizing", "preparing", "processing", "cancelling", "resuming"})
+# Statuses in which a worker process should be running for the recording.
+ACTIVE_STATUSES = frozenset({"transcribing", "diarizing", "importing", "processing", "resuming"})
+_FIELDS = frozenset({"title", "origin", "duration", "status", "progress", "error", "audio_path", "result_path", "partial_result_path", "stage", "transcription_warning", "backend", "backend_override", "speaker_names", "source_path", "worker_pid", "fallback_reason", "num_speakers", "min_speakers", "max_speakers", "requested_by", "source_sha256", "job_options", "resume_count", "worker_started"})
 
 
 def default_recordings_root() -> Path:
@@ -103,8 +105,13 @@ class RecordingStore:
             connection.execute("UPDATE recordings SET record=? WHERE id=?", (json.dumps(record), recording_id))
         return record
 
-    def transition(self, recording_id: str, expected_status, new_status: str, **fields) -> bool:
-        """Atomically claim/cancel/retry work without overwriting a concurrent state change."""
+    def transition(self, recording_id: str, expected_status, new_status: str, *, expect: dict | None = None,
+                   **fields) -> bool:
+        """Atomically claim/cancel/retry work without overwriting a concurrent state change.
+
+        ``expect`` adds compare-and-set conditions on other fields (e.g. the owner
+        ``worker_pid`` seen by the caller), so two processes cannot both claim a job.
+        """
         fields = self._validated_fields(recording_id, dict(fields, status=new_status))
         expected = {expected_status} if isinstance(expected_status, str) else set(expected_status)
         with self._connection() as connection:
@@ -114,6 +121,8 @@ class RecordingStore:
                 return False
             record = json.loads(row[0])
             if record["status"] not in expected:
+                return False
+            if any(record.get(name) != value for name, value in (expect or {}).items()):
                 return False
             record.update(fields)
             connection.execute("UPDATE recordings SET record=? WHERE id=?", (json.dumps(record), recording_id))

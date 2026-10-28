@@ -36,22 +36,8 @@ Write-Host "Building executable with PyInstaller..." -ForegroundColor Cyan
 if ($LASTEXITCODE -ne 0) { throw "DirectML runtime preparation failed" }
 Push-Location $ProjectRoot
 try {
-    & $PythonCmd -m PyInstaller --noconfirm --clean --onedir --windowed `
-        --name "Pace" --paths $SrcPath `
-        --icon "assets\branding\pace.ico" `
-        --add-data "assets\branding;assets\branding" `
-        --add-data ".runtime-directml;dml_runtime" `
-        --collect-all faster_whisper --collect-all ctranslate2 --collect-all av `
-        --collect-all customtkinter --collect-all keyring --collect-all win32ctypes `
-        --collect-all numpy `
-        --collect-all pyaudiowpatch --collect-all tkinterdnd2 --collect-all aec_audio_processing `
-        --collect-all pyannote.audio --collect-all pyannote.core --collect-all pyannote.pipeline `
-        --collect-all torch --collect-all torchaudio --collect-all torchcodec `
-        --collect-all onnx --collect-all onnxruntime --collect-all openvino `
-        --collect-all scipy --collect-all sklearn --collect-all huggingface_hub `
-        --hidden-import keyring.backends.Windows `
-        --collect-submodules openai --collect-submodules google.genai `
-        main.py
+    # Pace.spec builds Pace.exe (windowed) and pace-cli.exe (console) over one runtime.
+    & $PythonCmd -m PyInstaller --noconfirm --clean (Join-Path $ProjectRoot "Pace.spec")
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
 } finally {
     Pop-Location
@@ -85,6 +71,7 @@ if ($ISCC) {
         builtAtUtc = [DateTime]::UtcNow.ToString("o")
         installerSha256 = (Get-FileHash $InstallerPath -Algorithm SHA256).Hash
         executableSha256 = (Get-FileHash (Join-Path $ProjectRoot "dist\Pace\Pace.exe") -Algorithm SHA256).Hash
+        cliSha256 = (Get-FileHash (Join-Path $ProjectRoot "dist\Pace\pace-cli.exe") -Algorithm SHA256).Hash
     } | ConvertTo-Json | Set-Content (Join-Path $ProjectRoot "Output\Pace_Installer.build.json") -Encoding ascii
     Write-Host "[OK] Installer successfully built! Check the 'Output' folder." -ForegroundColor Green
 } else {

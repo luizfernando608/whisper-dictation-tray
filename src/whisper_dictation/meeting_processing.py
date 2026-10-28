@@ -541,6 +541,21 @@ def _write_result(directory: Path, record: dict, output: dict, store) -> None:
     atomic_json(directory / "result.json", output)
 
 
+def apply_job_options(config, record: dict) -> None:
+    """Re-apply what an agent asked for, whatever config snapshot the worker got.
+
+    The tray rewrites the snapshot when it resumes a job; offline-only audio must
+    still never be sent to a cloud provider.
+    """
+    options = record.get("job_options") if record.get("requested_by") == "agent" else None
+    if not isinstance(options, dict):
+        return
+    if options.get("provider") == "local":
+        config.transcription_provider = "local"
+    if options.get("language"):
+        config.language = str(options["language"])
+
+
 def process_recording(store_root, recording_id: str, config_path) -> dict | None:
     """Subprocess entry point. Ready means both ASR and full diarization finished."""
     from whisper_dictation.recording_store import RecordingStore
@@ -554,6 +569,7 @@ def process_recording(store_root, recording_id: str, config_path) -> dict | None
         load_env_file(config_path.parent)
         config = AppConfig.load(config_path)
         record = store.get(recording_id)
+        apply_job_options(config, record)
         if record.get("backend_override"):
             config.diarization_backend = str(record["backend_override"])
         audio = Path(record.get("audio_path") or directory / "audio.wav")
