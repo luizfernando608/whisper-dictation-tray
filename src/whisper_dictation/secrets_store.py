@@ -19,6 +19,7 @@ ENV_FALLBACK: dict[str, str] = {
     "groq": "GROQ_API_KEY",
     "openai": "OPENAI_API_KEY",
     "gemini": "GEMINI_API_KEY",
+    "huggingface": "HF_TOKEN",
 }
 
 _logger = logging.getLogger("whisper_dictation.secrets")

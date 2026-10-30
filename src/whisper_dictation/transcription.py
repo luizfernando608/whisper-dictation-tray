@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import inspect
+import json
 import logging
 import os
 import re
@@ -12,8 +14,12 @@ import numpy as np
 
 from whisper_dictation import secrets_store
 from whisper_dictation.audio import CapturedAudio
-from whisper_dictation.providers import CLOUD_PROVIDERS
+from whisper_dictation.providers import CLOUD_PROVIDERS, models_for
 from whisper_dictation.settings import AppConfig
+
+
+_CLOUD_MAX_FILE_BYTES = 25_000_000
+_GEMINI_MAX_INLINE_BYTES = 20_000_000
 
 
 class WhisperTranscriber:
@@ -30,16 +36,15 @@ class WhisperTranscriber:
         if audio.samples.size == 0 or _is_effectively_silent(audio.samples):
             return ""
 
-        # Chunk any audio longer than 25 minutes (1500s) to safely fit under cloud payload limits
         max_chunk_sec = 1500.0
-        if audio.duration_seconds > max_chunk_sec:
+        if len(audio.samples) > int(max_chunk_sec * audio.sample_rate):
             return self._transcribe_chunked(audio, chunk_seconds=max_chunk_sec)
 
         return self._transcribe_single(audio)
 
     def _transcribe_chunked(self, audio: CapturedAudio, chunk_seconds: float) -> str:
         samples = audio.samples
-        chunk_size = int(chunk_seconds * audio.sample_rate)
+        chunk_size = max(1, int(chunk_seconds * audio.sample_rate))
         total_samples = len(samples)
         results: list[str] = []
 
@@ -79,21 +84,25 @@ class WhisperTranscriber:
         try:
             provider = self.config.transcription_provider
             if provider in CLOUD_PROVIDERS:
+                if audio_path.stat().st_size > _CLOUD_MAX_FILE_BYTES:
+                    # Retry smaller PCM16 chunks when encoding falls back to WAV.
+                    max_samples = (_CLOUD_MAX_FILE_BYTES - 44) // 2
+                    if len(audio.samples) > max_samples:
+                        return self._transcribe_chunked(audio, max_samples / audio.sample_rate)
                 try:
                     return self._transcribe_with_cloud(provider, audio_path, audio.duration_seconds)
                 except Exception as exc:
                     self.logger.warning(
-                        "%s transcription failed; falling back to faster-whisper: %s",
+                        "%s transcription failed (%s); falling back to faster-whisper",
                         provider,
-                        exc,
-                        exc_info=True,
+                        type(exc).__name__,
                     )
             return self._transcribe_with_local_model(audio_path)
         finally:
             audio_path.unlink(missing_ok=True)
 
     def _write_temp_audio(self, audio: CapturedAudio) -> Path:
-        # Recordings up to 10 min (<= 600s) are small (< 20MB) in WAV; fast and lossless.
+        # Prefer lossless WAV for short recordings; check actual bytes before upload.
         if audio.duration_seconds <= 600:
             return self._write_temp_wav(audio)
         try:
@@ -109,23 +118,27 @@ class WhisperTranscriber:
         os.close(fd)
         mp3_path = Path(raw_path)
 
-        out = av.open(str(mp3_path), mode="w", format="mp3")
         try:
-            stream = out.add_stream("mp3", rate=audio.sample_rate)
-            stream.bit_rate = bit_rate
-            stream.layout = "mono"
+            out = av.open(str(mp3_path), mode="w", format="mp3")
+            try:
+                stream = out.add_stream("mp3", rate=audio.sample_rate)
+                stream.bit_rate = bit_rate
+                stream.layout = "mono"
 
-            frame = av.AudioFrame.from_ndarray(
-                audio.samples.reshape(1, -1), format="flt", layout="mono"
-            )
-            frame.sample_rate = audio.sample_rate
+                frame = av.AudioFrame.from_ndarray(
+                    audio.samples.reshape(1, -1), format="flt", layout="mono"
+                )
+                frame.sample_rate = audio.sample_rate
 
-            for packet in stream.encode(frame):
-                out.mux(packet)
-            for packet in stream.encode(None):
-                out.mux(packet)
-        finally:
-            out.close()
+                for packet in stream.encode(frame):
+                    out.mux(packet)
+                for packet in stream.encode(None):
+                    out.mux(packet)
+            finally:
+                out.close()
+        except Exception:
+            mp3_path.unlink(missing_ok=True)
+            raise
 
         return mp3_path
 
@@ -145,6 +158,8 @@ class WhisperTranscriber:
         return wav_path
 
     def _transcribe_with_cloud(self, provider: str, audio_path: Path, duration_seconds: float) -> str:
+        if audio_path.stat().st_size > _CLOUD_MAX_FILE_BYTES:
+            raise RuntimeError("Arquivo de áudio excede o limite de 25 MB")
         if provider == "groq":
             return self._transcribe_with_groq(audio_path, duration_seconds)
         if provider == "openai":
@@ -177,7 +192,7 @@ class WhisperTranscriber:
                 **request,
             )
 
-        text = _normalize_text(str(getattr(transcription, "text", "") or ""))
+        text = _require_transcript(getattr(transcription, "text", None))
         self.logger.info(
             "Groq transcription finished model=%s language=%s text_length=%s",
             self.config.groq_model,
@@ -208,18 +223,26 @@ class WhisperTranscriber:
             "response_format": "json",
         }
         if language is not None:
-            request["language"] = language
+            request["languages" if self.config.openai_model == "gpt-transcribe" else "language"] = (
+                [language] if self.config.openai_model == "gpt-transcribe" else language
+            )
+        if self.config.openai_model == "gpt-4o-transcribe-diarize":
+            request["chunking_strategy"] = "auto"
 
         timeout = max(self.config.groq_timeout_seconds, 60.0 + duration_seconds * 0.15)
 
-        with audio_path.open("rb") as audio_file:
-            transcription = client.audio.transcriptions.create(
-                file=audio_file,
-                timeout=timeout,
-                **request,
-            )
+        try:
+            with audio_path.open("rb") as audio_file:
+                transcription = client.audio.transcriptions.create(
+                    file=audio_file,
+                    timeout=timeout,
+                    **request,
+                )
+        finally:
+            client.close()
+            self._openai_client = None
 
-        text = _normalize_text(str(getattr(transcription, "text", "") or ""))
+        text = _require_transcript(getattr(transcription, "text", None))
         self.logger.info(
             "OpenAI transcription finished model=%s language=%s text_length=%s",
             self.config.openai_model,
@@ -256,16 +279,58 @@ class WhisperTranscriber:
             prompt += f" O idioma falado é '{language}'."
 
         mime_type = "audio/mp3" if audio_path.suffix.lower() == ".mp3" else "audio/wav"
-        audio_part = types.Part.from_bytes(
-            data=audio_path.read_bytes(),
-            mime_type=mime_type,
-        )
-        response = client.models.generate_content(
-            model=self.config.gemini_model,
-            contents=[prompt, audio_part],
-        )
-
-        text = _normalize_text(str(getattr(response, "text", "") or ""))
+        model = self.config.gemini_model
+        modern = model in models_for("gemini")
+        dedicated = model == "gemini-3.5-transcribe"
+        uploaded = None
+        try:
+            # Include base64 expansion and JSON/prompt overhead in the inline budget.
+            encoded_size = 4 * ((audio_path.stat().st_size + 2) // 3)
+            overhead = len(json.dumps({"model": model, "prompt": prompt}).encode("utf-8")) + 2048
+            if encoded_size + overhead >= _GEMINI_MAX_INLINE_BYTES:
+                uploaded = client.files.upload(file=audio_path, config={"mime_type": mime_type})
+                if not uploaded.uri or not uploaded.name:
+                    raise RuntimeError("Upload de áudio do Gemini inválido")
+                audio_input = {"type": "audio", "uri": uploaded.uri, "mime_type": mime_type}
+                audio_part = types.Part.from_uri(file_uri=uploaded.uri, mime_type=mime_type)
+            else:
+                data = audio_path.read_bytes()
+                audio_input = {"type": "audio", "data": base64.b64encode(data).decode("ascii"), "mime_type": mime_type}
+                audio_part = types.Part.from_bytes(data=data, mime_type=mime_type)
+            if modern:
+                request = {"model": model, "input": [audio_input], "store": False}
+                if dedicated:
+                    # UI languages are pt/en; retain explicit regional custom hints.
+                    locale = {"pt": "pt-BR", "en": "en-US"}.get(language, language)
+                    request["generation_config"] = {"transcription_config": {
+                        "language_codes": [locale] if locale else [],
+                        "mode": {"type": "verbatim"},
+                    }}
+                else:
+                    request["input"].insert(0, {"type": "text", "text": prompt})
+                response = client.interactions.create(**request)
+                if response.status != "completed" or response.errors:
+                    raise RuntimeError("Transcrição do Gemini bloqueada ou incompleta")
+                if any(getattr(step, "error", None) for step in (response.steps or [])):
+                    raise RuntimeError("Transcrição do Gemini bloqueada ou incompleta")
+                text = _require_transcript(response.output_text)
+            else:
+                response = client.models.generate_content(model=model, contents=[prompt, audio_part])
+                candidates = response.candidates or []
+                if not candidates or any(candidate.finish_reason != types.FinishReason.STOP for candidate in candidates):
+                    raise RuntimeError("Transcrição do Gemini bloqueada ou incompleta")
+                if response.prompt_feedback and response.prompt_feedback.block_reason:
+                    raise RuntimeError("Transcrição do Gemini bloqueada")
+                text = _require_transcript(response.text)
+        finally:
+            try:
+                if uploaded is not None and uploaded.name:
+                    try:
+                        client.files.delete(name=uploaded.name)
+                    except Exception as exc:
+                        self.logger.warning("Gemini upload cleanup failed (%s)", type(exc).__name__)
+            finally:
+                client.close()
         self.logger.info(
             "Gemini transcription finished model=%s language=%s text_length=%s",
             self.config.gemini_model,
@@ -338,6 +403,13 @@ class WhisperTranscriber:
 def _normalize_text(text: str) -> str:
     text = re.sub(r"\s+", " ", text).strip()
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    return text
+
+
+def _require_transcript(value: object) -> str:
+    text = _normalize_text(value) if isinstance(value, str) else ""
+    if not text:
+        raise RuntimeError("Resposta de transcrição vazia")
     return text
 
 

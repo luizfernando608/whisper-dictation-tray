@@ -1,7 +1,7 @@
 faster-whisper>=1.2.0,<2.0.0
 groq>=0.31.0,<1.0.0
-openai>=2.0.0,<3.0.0
-google-genai>=1.0.0,<3.0.0
+openai>=2.54.0,<3.0.0
+google-genai>=2.22.0,<3.0.0
 numpy>=1.26,<3.0
 sounddevice>=0.5,<0.6
 pystray>=0.19.5,<0.20
@@ -9,3 +9,13 @@ Pillow>=10.4,<12.0
 pyperclip>=1.9,<2.0
 keyring>=25.0,<26.0
 customtkinter>=5.2,<7.0
+av>=14,<19
+PyAudioWPatch>=0.2.12,<0.3
+aec-audio-processing==1.0.1; sys_platform == "win32"
+tkinterdnd2>=0.6.4,<1
+pyannote.audio==4.0.7
+torch==2.11.0
+torchaudio==2.11.0
+onnx>=1.23,<2
+onnxruntime>=1.24,<2
+openvino>=2026.4,<2027

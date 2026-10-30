@@ -32,18 +32,13 @@ $AppVersion = $VersionMatch.Matches[0].Groups[1].Value
 Write-Host "Building version $AppVersion" -ForegroundColor Cyan
 
 Write-Host "Building executable with PyInstaller..." -ForegroundColor Cyan
+& $PythonCmd (Join-Path $ProjectRoot "scripts\prepare_directml_runtime.py")
+if ($LASTEXITCODE -ne 0) { throw "DirectML runtime preparation failed" }
 Push-Location $ProjectRoot
 try {
-    & $PythonCmd -m PyInstaller --noconfirm --clean --onedir --windowed `
-        --name "Pace" --paths $SrcPath `
-        --icon "assets\branding\pace.ico" `
-        --add-data "assets\branding;assets\branding" `
-        --collect-all faster_whisper --collect-all ctranslate2 --collect-all av `
-        --collect-all customtkinter --collect-all keyring --collect-all win32ctypes `
-        --collect-all numpy `
-        --hidden-import keyring.backends.Windows `
-        --collect-submodules openai --collect-submodules google.genai `
-        main.py
+    # Pace.spec builds Pace.exe (windowed) and pace-cli.exe (console) over one runtime.
+    & $PythonCmd -m PyInstaller --noconfirm --clean (Join-Path $ProjectRoot "Pace.spec")
+    if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
 } finally {
     Pop-Location
 }
@@ -62,6 +57,22 @@ if (Test-Path $ISCC_System) {
 if ($ISCC) {
     Write-Host "Building Installer with Inno Setup..." -ForegroundColor Cyan
     & $ISCC "/DAppVersion=$AppVersion" "installer.iss"
+    if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+    $InstallerPath = Join-Path $ProjectRoot "Output\Pace_Installer.exe"
+    Get-FileHash $InstallerPath -Algorithm SHA256 |
+        Select-Object Algorithm, Hash | ConvertTo-Json |
+        Set-Content (Join-Path $ProjectRoot "Output\Pace_Installer.sha256.json") -Encoding ascii
+    $PaceBuildCommit = & git -C $ProjectRoot rev-parse HEAD
+    $PaceBuildDirty = [bool](& git -C $ProjectRoot status --porcelain)
+    [ordered]@{
+        version = $AppVersion
+        sourceCommit = $PaceBuildCommit
+        sourceDirty = $PaceBuildDirty
+        builtAtUtc = [DateTime]::UtcNow.ToString("o")
+        installerSha256 = (Get-FileHash $InstallerPath -Algorithm SHA256).Hash
+        executableSha256 = (Get-FileHash (Join-Path $ProjectRoot "dist\Pace\Pace.exe") -Algorithm SHA256).Hash
+        cliSha256 = (Get-FileHash (Join-Path $ProjectRoot "dist\Pace\pace-cli.exe") -Algorithm SHA256).Hash
+    } | ConvertTo-Json | Set-Content (Join-Path $ProjectRoot "Output\Pace_Installer.build.json") -Encoding ascii
     Write-Host "[OK] Installer successfully built! Check the 'Output' folder." -ForegroundColor Green
 } else {
     Write-Host "[WARNING] Inno Setup 6 not found." -ForegroundColor Yellow

@@ -13,6 +13,7 @@ third-party dependency.
 from __future__ import annotations
 
 import logging
+import json
 import socket
 import threading
 from typing import Callable
@@ -25,6 +26,13 @@ COPY_LAST_TRANSCRIPT = "copy-last-transcript"
 QUIT = "quit"
 PING = "ping"
 PONG = "pong"
+OPEN_RECORDINGS = "open-recordings"
+MEETING_TOGGLE = "meeting-toggle"
+MEETING_PAUSE = "meeting-pause"
+APPLY_UPDATE = "apply-update"
+CAPABILITIES = "capabilities"
+SAVE_SETTINGS = "save-settings"
+IMPORT_MEDIA = "import-media"
 
 _ENCODING = "utf-8"
 _logger = logging.getLogger("whisper_dictation.ipc")
@@ -35,6 +43,7 @@ class SingleInstance:
         self.port = port
         self._server: socket.socket | None = None
         self._handlers: dict[str, Callable[[], None]] = {}
+        self._requests: dict[str, Callable[[dict], dict]] = {}
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
 
@@ -54,6 +63,9 @@ class SingleInstance:
     def register(self, command: str, handler: Callable[[], None]) -> None:
         self._handlers[command] = handler
 
+    def register_request(self, command: str, handler: Callable[[dict], dict]) -> None:
+        self._requests[command] = handler
+
     def start_listener(self) -> None:
         if self._server is None:
             raise RuntimeError("try_acquire() precisa ser chamado (com sucesso) antes.")
@@ -62,17 +74,35 @@ class SingleInstance:
 
     def _serve(self) -> None:
         assert self._server is not None
+        server = self._server
         while not self._stop.is_set():
             try:
-                conn, _ = self._server.accept()
+                conn, _ = server.accept()
             except socket.timeout:
                 continue
             except OSError:
                 break
             with conn:
                 try:
-                    command = conn.recv(1024).decode(_ENCODING).strip()
-                except OSError:
+                    conn.settimeout(3)
+                    data = conn.recv(65536)
+                    if data.startswith(b"{"):
+                        while b"\n" not in data and len(data) < 65536:
+                            chunk = conn.recv(min(4096, 65536 - len(data)))
+                            if not chunk:
+                                break
+                            data += chunk
+                        payload = json.loads(data.decode(_ENCODING))
+                        handler = self._requests.get(payload.get("command"))
+                        try:
+                            response = handler(payload) if handler else {"ok": False, "error": "Comando indisponível."}
+                        except Exception:
+                            _logger.exception("Falha ao executar solicitação do canal de controle.")
+                            response = {"ok": False, "error": "Não foi possível concluir a solicitação. Consulte os logs do PACE."}
+                        conn.sendall(json.dumps(response, ensure_ascii=False).encode(_ENCODING) + b"\n")
+                        continue
+                    command = data.decode(_ENCODING).strip()
+                except (OSError, ValueError, TypeError, AttributeError):
                     continue
                 if command == PING:
                     try:
@@ -82,10 +112,12 @@ class SingleInstance:
                     continue
                 handler = self._handlers.get(command)
                 if handler is None:
-                    _logger.debug("Comando de controle desconhecido: %r", command)
+                    _logger.debug("Comando de controle desconhecido.")
                     continue
                 try:
-                    handler()
+                    result = handler()
+                    if result is not None:
+                        conn.sendall(json.dumps(result, ensure_ascii=False).encode(_ENCODING) + b"\n")
                 except Exception:
                     _logger.exception("Handler do canal de controle falhou: %s", command)
 
@@ -124,3 +156,26 @@ def probe(port: int = DEFAULT_PORT, timeout: float = 1.0) -> bool:
         return reply == PONG
     except OSError:
         return False
+
+
+def request(command: str | dict, port: int = DEFAULT_PORT, timeout: float = 30.0) -> dict:
+    """Bounded transient IPC; credential values are never written to disk/logs."""
+    wire = json.dumps(command, ensure_ascii=False) if isinstance(command, dict) else command
+    encoded = wire.encode(_ENCODING) + b"\n"
+    if len(encoded) > 65536:
+        raise ValueError("Pedido de configurações muito grande.")
+    with socket.create_connection((HOST, port), timeout=timeout) as conn:
+        conn.settimeout(timeout)
+        conn.sendall(encoded)
+        data = bytearray()
+        while b"\n" not in data and len(data) < 65536:
+            chunk = conn.recv(min(4096, 65536 - len(data)))
+            if not chunk:
+                break
+            data.extend(chunk)
+    if not data:
+        raise RuntimeError("Esta instância do PACE não oferece salvamento seguro. Abra a versão atual.")
+    result = json.loads(data.decode(_ENCODING))
+    if not isinstance(result, dict):
+        raise RuntimeError("Resposta inválida do PACE.")
+    return result

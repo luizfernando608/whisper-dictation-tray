@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "1.4.0"
+  #define AppVersion "1.6.0"
 #endif
 
 [Setup]
@@ -7,6 +7,8 @@ AppId=Pace
 AppName=PACE
 AppVersion={#AppVersion}
 AppPublisher=PACE
+ArchitecturesAllowed=x64compatible
+MinVersion=10.0
 DefaultDirName={localappdata}\Pace
 DefaultGroupName=PACE
 UninstallDisplayIcon={app}\Pace.exe
@@ -17,7 +19,7 @@ DisableDirPage=auto
 DisableProgramGroupPage=auto
 UsePreviousAppDir=yes
 CloseApplications=yes
-CloseApplicationsFilter=Pace.exe,WhisperDictationTray.exe
+CloseApplicationsFilter=Pace.exe,pace-cli.exe,WhisperDictationTray.exe
 RestartApplications=no
 Compression=lzma2
 SolidCompression=yes
@@ -27,6 +29,7 @@ PrivilegesRequired=lowest
 
 [InstallDelete]
 Type: files; Name: "{app}\Pace.exe"
+Type: files; Name: "{app}\pace-cli.exe"
 Type: files; Name: "{app}\WhisperDictationTray.exe"
 Type: filesandordirs; Name: "{app}\_internal"
 Type: files; Name: "{userdesktop}\Whisper Dictation — Configurações.lnk"
@@ -34,14 +37,22 @@ Type: files; Name: "{userdesktop}\Whisper Dictation.lnk"
 Type: files; Name: "{userstartup}\Whisper Dictation.lnk"
 
 [Files]
-Source: "dist\Pace\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Inference does not use ONNX test fixtures or C++ build headers. Shipping them
+; can exceed Windows path limits when installing under a longer profile path.
+Source: "dist\Pace\*"; DestDir: "{app}"; Excludes: "\_internal\onnx\backend\test\*,\_internal\torch\include\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\PACE"; Filename: "{app}\Pace.exe"
+Name: "{group}\PACE"; Filename: "{app}\Pace.exe"; Parameters: "--recordings"
 Name: "{group}\PACE — Configurações"; Filename: "{app}\Pace.exe"; Parameters: "--settings"
-Name: "{userdesktop}\PACE"; Filename: "{app}\Pace.exe"
+Name: "{group}\PACE — Gravações"; Filename: "{app}\Pace.exe"; Parameters: "--recordings"
+Name: "{userdesktop}\PACE"; Filename: "{app}\Pace.exe"; Parameters: "--recordings"
 Name: "{userdesktop}\PACE — Configurações"; Filename: "{app}\Pace.exe"; Parameters: "--settings"
+Name: "{userdesktop}\PACE — Gravações"; Filename: "{app}\Pace.exe"; Parameters: "--recordings"
 Name: "{userstartup}\PACE"; Filename: "{app}\Pace.exe"
 
+[UninstallRun]
+; Remove only the MCP entries and skills that PACE added to AI agents.
+Filename: "{app}\pace-cli.exe"; Parameters: "agents disconnect --all --quiet"; Flags: runhidden waituntilterminated skipifdoesntexist; RunOnceId: "PaceAgentsDisconnect"
+
 [Run]
-Filename: "{app}\Pace.exe"; Description: "Launch PACE"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\Pace.exe"; Parameters: "--recordings"; Description: "Launch PACE"; Flags: nowait postinstall skipifsilent

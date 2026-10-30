@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -15,21 +16,34 @@ class AppConfig:
     language: str = "auto"
     transcription_provider: str = "groq"
     groq_model: str = "whisper-large-v3"
-    openai_model: str = "gpt-4o-transcribe"
-    gemini_model: str = "gemini-2.5-flash"
+    openai_model: str = "gpt-transcribe"
+    gemini_model: str = "gemini-3.8-flash"
     groq_api_key_env: str = "GROQ_API_KEY"
     groq_timeout_seconds: float = 30.0
     model_size: str = "small"
     compute_type: str = "int8"
     sample_rate: int = 16000
     input_device: int | str | None = None
-    max_record_seconds: int = 1800
+    max_record_seconds: int = 0
     beam_size: int = 1
     vad_min_silence_ms: int = 400
     insert_mode: str = "paste"
     restore_clipboard: bool = True
     typing_interval_ms: int = 4
     cpu_threads: int = 0
+    meeting_hotkey: str = "Ctrl+Shift+R"
+    meeting_pause_hotkey: str = "Ctrl+Shift+P"
+    meeting_input_device: str | None = None
+    meeting_output_device: str | None = None
+    meeting_storage_dir: str = ""
+    meeting_show_overlay: bool = False
+    meeting_timestamp_provider: str = "local"
+    diarization_engine: str = "nemotron"
+    diarization_backend: str = "auto"
+    diarization_model_dir: str = ""
+    diarization_num_speakers: int = 0
+    diarization_min_speakers: int = 0
+    diarization_max_speakers: int = 0
 
     @classmethod
     def load(cls, path: Path) -> "AppConfig":
@@ -42,10 +56,17 @@ class AppConfig:
         return cls(**cls._sanitize(data))
 
     def save(self, path: Path) -> None:
-        path.write_text(
-            json.dumps(asdict(self), indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(dir=path.parent, prefix="config-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(asdict(self), stream, indent=2, ensure_ascii=False)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
 
     @classmethod
     def _sanitize(cls, data: dict[str, Any]) -> dict[str, Any]:
@@ -90,6 +111,30 @@ class AppConfig:
                 int(input_device_text) if input_device_text.isdigit() else input_device_text or None
             )
         sanitized["restore_clipboard"] = bool(sanitized["restore_clipboard"])
+        for key in ("meeting_hotkey", "meeting_pause_hotkey"):
+            sanitized[key] = str(sanitized[key]).strip()
+        sanitized["meeting_hotkey"] = sanitized["meeting_hotkey"] or defaults["meeting_hotkey"]
+        for key in ("meeting_input_device", "meeting_output_device"):
+            sanitized[key] = str(sanitized[key]).strip() if sanitized[key] is not None else None
+            sanitized[key] = sanitized[key] or None
+        for key in ("meeting_storage_dir", "diarization_model_dir"):
+            sanitized[key] = str(sanitized[key]).strip()
+        sanitized["meeting_show_overlay"] = bool(sanitized["meeting_show_overlay"])
+        sanitized["diarization_num_speakers"] = max(0, int(sanitized["diarization_num_speakers"]))
+        if sanitized["diarization_num_speakers"] > 50:
+            raise ValueError("A quantidade de falantes deve estar entre 0 e 50.")
+        for key in ("diarization_min_speakers", "diarization_max_speakers"):
+            sanitized[key] = max(0, int(sanitized[key]))
+            if sanitized[key] > 50:
+                raise ValueError("A quantidade de falantes deve estar entre 0 e 50.")
+        if sanitized["diarization_min_speakers"] and sanitized["diarization_max_speakers"] and sanitized["diarization_min_speakers"] > sanitized["diarization_max_speakers"]:
+            raise ValueError("O mínimo de falantes não pode superar o máximo.")
+        if sanitized["diarization_engine"] not in {"nemotron", "community-1"}:
+            sanitized["diarization_engine"] = "nemotron"
+        if sanitized["diarization_backend"] not in {"auto", "cpu", "cuda", "vulkan", "openvino", "directml"}:
+            sanitized["diarization_backend"] = "auto"
+        if sanitized["meeting_timestamp_provider"] not in {"local", "whisper-1"}:
+            sanitized["meeting_timestamp_provider"] = "local"
         return sanitized
 
 
@@ -147,3 +192,29 @@ def temp_dir(project_root: Path) -> Path:
     path = project_root / "temp"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def data_dir() -> Path:
+    """User data survives installation/runtime replacement."""
+    root = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / ".local" / "share"))) / "PaceData"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def recordings_dir(config: AppConfig) -> Path:
+    root = Path(config.meeting_storage_dir).expanduser() if config.meeting_storage_dir else data_dir() / "recordings"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def validate_hotkeys(config: AppConfig) -> None:
+    from whisper_dictation.win32_hotkey import parse_hotkey
+
+    seen: set[tuple[int, int]] = set()
+    for label, value in (("ditado", config.hotkey), ("reunião", config.meeting_hotkey), ("pausa", config.meeting_pause_hotkey)):
+        if not value and label == "pausa":
+            continue
+        parsed = parse_hotkey(value)
+        if parsed in seen:
+            raise ValueError(f"O atalho de {label} já está sendo usado por outra ação do PACE.")
+        seen.add(parsed)

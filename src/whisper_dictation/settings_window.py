@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import ctypes
+import json
+import queue
+import subprocess
 import sys
+import tempfile
 import threading
 import tkinter as tk
+import webbrowser
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from tkinter import messagebox
+from tkinter import messagebox, filedialog
 from typing import Callable
 
 import customtkinter as ctk
@@ -16,7 +21,7 @@ from whisper_dictation import secrets_store
 from whisper_dictation._version import __version__
 from whisper_dictation.audio import list_input_devices
 from whisper_dictation.providers import CLOUD_PROVIDERS, PROVIDER_ORDER, PROVIDERS
-from whisper_dictation.settings import AppConfig
+from whisper_dictation.settings import AppConfig, data_dir, validate_hotkeys
 from whisper_dictation.win32_hotkey import parse_hotkey
 
 SaveCallback = Callable[[AppConfig], bool]
@@ -43,7 +48,7 @@ RECORD_LIMIT_OPTIONS = [
     ("Sem limite (manual pelo atalho)", 0),
     ("120 minutos (2 horas)", 7200),
     ("60 minutos (1 hora)", 3600),
-    ("30 minutos (recomendado)", 1800),
+    ("30 minutos", 1800),
     ("15 minutos", 900),
     ("10 minutos", 600),
     ("5 minutos", 300),
@@ -117,6 +122,10 @@ class SettingsContext:
     has_last_transcript: Callable[[], bool] | None = None
     check_update: Callable[[], object | None] | None = None
     run_update: Callable[[object], None] | None = None
+    can_save: Callable[[], bool] | None = None
+    commit_settings: Callable[[AppConfig, dict[str, str]], bool] | None = None
+    # "status" | "connect" | "disconnect" -> human-readable report (runs off the UI thread)
+    agents_action: Callable[[str], str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +146,72 @@ def run_settings_window(
     calls this so CTk owns a clean main thread.
     """
     _run_window(replace(config), on_save, context or SettingsContext())
+
+
+class SettingsFrame(ctk.CTkFrame):
+    """Settings draft embedded in the main window's existing Tk interpreter."""
+
+    def __init__(self, parent, config, on_save, context, on_close=None):
+        self._disposed = False
+        self._active = True
+        self._after_tokens: set[str] = set()
+        self._cleanup_callbacks: list[Callable[[], None]] = []
+        self._deactivate_callbacks: list[Callable[[], None]] = []
+        self._model_setup = None
+        self._on_close = on_close or (lambda saved: self.destroy())
+        super().__init__(parent, fg_color=COLOR_BG_ROOT, corner_radius=0)
+        _build_settings_contents(self, replace(config), on_save, context)
+
+    def after(self, ms, func=None, *args):
+        if func is None:
+            return super().after(ms)
+        def invoke():
+            self._after_tokens.discard(token)
+            if not self._disposed:
+                func(*args)
+        token = super().after(ms, invoke)
+        self._after_tokens.add(token)
+        return token
+
+    def set_active(self, active: bool) -> None:
+        self._active = active
+        if not active:
+            for callback in self._deactivate_callbacks:
+                callback()
+
+    def can_close(self) -> bool:
+        return not self._model_setup or self._model_setup[0].poll() is not None
+
+    def cancel(self) -> None:
+        if not self.can_close():
+            messagebox.showinfo("Modelos", "Aguarde o preparo dos modelos antes de fechar ou salvar as configurações.", parent=self.winfo_toplevel())
+            return
+        self._on_close(None)
+
+    def destroy(self) -> None:
+        if self._disposed:
+            return
+        self._disposed = True
+        for token in tuple(self._after_tokens):
+            self.after_cancel(token)
+        self._after_tokens.clear()
+        for callback in self._cleanup_callbacks:
+            callback()
+        if self._model_setup:
+            self._model_setup[1].close()
+            self._model_setup = None
+        super().destroy()
+
+
+def build_settings_frame(
+    parent,
+    config: AppConfig,
+    on_save: SaveCallback,
+    context: SettingsContext | None = None,
+    *,
+    on_close: Callable[[AppConfig | None], None] | None = None,
+) -> SettingsFrame:
+    return SettingsFrame(parent, config, on_save, context or SettingsContext(), on_close)
 
 
 def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsContext) -> None:
@@ -183,6 +258,17 @@ def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsConte
     except Exception:
         pass
 
+    from whisper_dictation.ui_utils import close_window, fit_window
+    frame = build_settings_frame(root, config, on_save, context, on_close=lambda saved: close_window(root))
+    frame.pack(fill="both", expand=True)
+    root.protocol("WM_DELETE_WINDOW", frame.cancel)
+    fit_window(root, preferred=(680, 580), minimum=(640, 520))
+    root.after(60, root.lift)
+    root.after(80, root.focus_force)
+    root.mainloop()
+
+
+def _build_settings_contents(root: SettingsFrame, config: AppConfig, on_save: SaveCallback, context: SettingsContext) -> None:
     heading_font = ctk.CTkFont(size=16, weight="bold")
     hint_font = ctk.CTkFont(size=11)
     muted = COLOR_TEXT_MUTED
@@ -213,9 +299,9 @@ def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsConte
     limit_by_label = {label: value for label, value in limit_options}
     limit_labels = [label for label, _ in limit_options]
 
-    hotkey_var = tk.StringVar(value=config.hotkey)
-    key_var = tk.StringVar()
-    show_key_var = tk.BooleanVar(value=False)
+    hotkey_var = tk.StringVar(master=root, value=config.hotkey)
+    key_var = tk.StringVar(master=root)
+    show_key_var = tk.BooleanVar(master=root, value=False)
 
     # Reusable control style dictionary
     menu_style = {
@@ -231,8 +317,8 @@ def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsConte
 
     tabview = ctk.CTkTabview(
         root,
-        width=480,
-        height=300,
+        width=610,
+        height=430,
         anchor="w",
         fg_color=COLOR_BG_CARD,
         border_color=COLOR_BORDER,
@@ -247,6 +333,7 @@ def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsConte
     tab_trans = tabview.add("Transcrição")
     tab_audio = tabview.add("Áudio")
     tab_hotkey = tabview.add("Atalho")
+    tab_meeting = tabview.add("Reuniões")
     tab_about = tabview.add("Sobre")
 
     # =========================== TRANSCRIÇÃO ===========================
@@ -426,16 +513,25 @@ def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsConte
     capture_btn.pack(side="left", padx=(8, 0))
     hotkey_status = ctk.CTkLabel(tab_hotkey, text="Ex.: Ctrl+Shift+H", text_color=muted, font=hint_font)
     hotkey_status.pack(anchor="w", padx=4, pady=(8, 0))
-    _wire_hotkey_capture(tab_hotkey, capture_btn, hotkey_var, hotkey_status)
+    deactivate, cleanup = _wire_hotkey_capture(tab_hotkey, capture_btn, hotkey_var, hotkey_status, owner=root)
+    root._deactivate_callbacks.append(deactivate)
+    root._cleanup_callbacks.append(cleanup)
+    collect_meeting = _build_meeting_tab(tab_meeting, config, menu_style, root)
 
     # ============================== SOBRE =============================
-    _build_about_tab(tab_about, context, heading_font, muted)
+    _build_about_tab(tab_about, context, heading_font, muted, owner=root)
 
     # ============================== RODAPÉ ============================
     footer = ctk.CTkFrame(root, fg_color="transparent")
     footer.pack(fill="x", padx=16, pady=(10, 14))
 
     def save() -> None:
+        if context.can_save and not context.can_save():
+            messagebox.showerror("Configurações", "Conclua a reunião e a fila antes de salvar alterações.")
+            return
+        if not root.can_close():
+            messagebox.showinfo("Modelos", "Aguarde o preparo dos modelos antes de fechar ou salvar as configurações.")
+            return
         _stash_current()
 
         hotkey = hotkey_var.get().strip()
@@ -460,17 +556,31 @@ def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsConte
         data["input_device"] = selected_mic.value
         data["max_record_seconds"] = limit_by_label.get(limit_menu.get(), config.max_record_seconds)
         data["hotkey"] = hotkey
-
-        new_config = AppConfig(**AppConfig._sanitize(data))
-
         try:
-            _persist_keys(key_by_provider, original_keys)
+            data.update(collect_meeting())
+            new_config = AppConfig(**AppConfig._sanitize(data))
+            validate_hotkeys(new_config)
         except Exception as exc:
-            messagebox.showerror("Configurações", f"Falha ao salvar a chave de API: {exc}")
+            messagebox.showerror("Configurações", str(exc))
             return
 
-        if on_save(new_config):
-            root.destroy()
+        if context.commit_settings:
+            changes = {key: value for key, value in key_by_provider.items() if value != original_keys.get(key, "")}
+            token_value = collect_meeting.token_value()
+            if token_value != collect_meeting.token_original:
+                changes["huggingface"] = token_value
+            try:
+                saved = context.commit_settings(new_config, changes)
+            except Exception as exc:
+                messagebox.showerror("Configurações", str(exc))
+                return
+        else:
+            if any(key_by_provider[p] != original_keys[p] for p in original_keys) or collect_meeting.token_value() != collect_meeting.token_original:
+                messagebox.showerror("Configurações", "Abra a versão atual do PACE na bandeja para salvar credenciais com segurança.")
+                return
+            saved = on_save(new_config)
+        if saved:
+            root._on_close(new_config)
         else:
             messagebox.showerror(
                 "Configurações", "Não foi possível salvar agora. Veja os logs do aplicativo."
@@ -480,7 +590,7 @@ def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsConte
         footer,
         text="Cancelar",
         width=110,
-        command=root.destroy,
+        command=root.cancel,
         fg_color="transparent",
         hover_color="#181C28",
         border_color=COLOR_BORDER,
@@ -500,11 +610,175 @@ def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsConte
         corner_radius=7,
     ).pack(side="right", padx=(0, 8))
 
-    root.update_idletasks()
-    _center(root)
-    root.after(60, root.lift)
-    root.after(80, root.focus_force)
-    root.mainloop()
+
+def _build_meeting_tab(tab, config, menu_style, root):
+    from whisper_dictation.meeting_audio import list_meeting_devices
+    from whisper_dictation.meeting_service import runtime_command
+    frame = ctk.CTkScrollableFrame(tab, fg_color="transparent")
+    frame.pack(fill="both", expand=True)
+    fields = {}
+    def entry(key, label, value, show=None):
+        ctk.CTkLabel(frame, text=label, anchor="w").pack(fill="x", pady=(10, 4))
+        widget = ctk.CTkEntry(frame, show=show or "")
+        widget.insert(0, str(value))
+        widget.pack(fill="x")
+        fields[key] = widget
+        return widget
+    entry("meeting_hotkey", "Iniciar / encerrar reunião", config.meeting_hotkey)
+    entry("meeting_pause_hotkey", "Pausar / retomar (vazio para desativar)", config.meeting_pause_hotkey)
+    try:
+        devices = list_meeting_devices()
+    except Exception as exc:
+        devices = {"inputs": [], "outputs": []}
+        ctk.CTkLabel(frame, text=f"Dispositivos indisponíveis: {exc}", wraplength=530, text_color=COLOR_DANGER).pack(fill="x", pady=8)
+    mappings = {}
+    for key, label, kind in (("meeting_input_device", "Microfone da reunião", "inputs"), ("meeting_output_device", "Saída de áudio do computador", "outputs")):
+        ctk.CTkLabel(frame, text=label, anchor="w").pack(fill="x", pady=(10, 4))
+        choices = {"Padrão do sistema": None}
+        for device in devices[kind]:
+            choices[f"{device['name']} [{device['id']}]"] = str(device["id"])
+        selected = getattr(config, key)
+        current = next((name for name, value in choices.items() if value == selected), None)
+        if current is None:
+            current = f"Dispositivo salvo (indisponível): {selected}"
+            choices[current] = selected
+        widget = ctk.CTkOptionMenu(frame, values=list(choices), dynamic_resizing=False, **menu_style)
+        widget.set(current)
+        widget.pack(fill="x")
+        fields[key], mappings[key] = widget, choices
+    overlay = tk.BooleanVar(master=tab, value=config.meeting_show_overlay)
+    ctk.CTkCheckBox(frame, text="Mostrar cápsula discreta durante a reunião", variable=overlay).pack(anchor="w", pady=14)
+    ctk.CTkLabel(frame, text="Reuniões são gravadas sem limite de tempo e salvas em disco.\nA saída selecionada inclui todos os sons reproduzidos nela.", justify="left", text_color=COLOR_TEXT_MUTED).pack(fill="x")
+    folder = entry("meeting_storage_dir", "Pasta da biblioteca (vazio usa a pasta padrão do PACE)", config.meeting_storage_dir)
+    def choose_folder():
+        value = filedialog.askdirectory(parent=root)
+        if value:
+            folder.delete(0, "end")
+            folder.insert(0, value)
+    ctk.CTkButton(frame, text="Escolher pasta", width=130, command=choose_folder).pack(anchor="w", pady=5)
+    ctk.CTkLabel(frame, text="Diarização local", font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w", pady=(16, 4))
+    engines = {"Nemotron 3 — sem token (até 8 falantes)": "nemotron", "Community-1 — avançado (contagem orientada)": "community-1"}
+    engine = ctk.CTkOptionMenu(frame, values=list(engines), **menu_style)
+    engine.set(next(k for k, v in engines.items() if v == config.diarization_engine))
+    engine.pack(fill="x", pady=4)
+    backends = {"Automático (testar e escolher)": "auto", "CPU": "cpu", "GPU Vulkan": "vulkan", "NVIDIA CUDA": "cuda", "Intel OpenVINO": "openvino", "DirectML": "directml"}
+    backend = ctk.CTkOptionMenu(frame, values=list(backends), **menu_style)
+    backend.set(next(k for k, v in backends.items() if v == config.diarization_backend))
+    backend.pack(fill="x", pady=4)
+    entry("diarization_num_speakers", "Quantidade de falantes (0 = automática)", config.diarization_num_speakers)
+    entry("diarization_min_speakers", "Mínimo de falantes (0 = automático)", config.diarization_min_speakers)
+    entry("diarization_max_speakers", "Máximo de falantes (0 = automático)", config.diarization_max_speakers)
+    entry("diarization_model_dir", "Pasta dos modelos (vazio usa cache padrão)", config.diarization_model_dir)
+    ctk.CTkLabel(frame, text="Para modelos de transcrição sem timestamps, usar:", anchor="w").pack(fill="x", pady=(10, 4))
+    timing = ctk.CTkOptionMenu(frame, values=["Whisper local", "OpenAI whisper-1"], **menu_style)
+    timing.set("Whisper local" if config.meeting_timestamp_provider == "local" else "OpenAI whisper-1")
+    timing.pack(fill="x")
+    model_hint = ctk.CTkLabel(frame, text="", justify="left", wraplength=530, text_color=COLOR_TEXT_MUTED)
+    model_hint.pack(fill="x", pady=(16, 5))
+    ctk.CTkButton(frame, text="Abrir página do modelo", command=lambda: webbrowser.open("https://huggingface.co/nvidia/Nemotron-3-Diarization" if engines[engine.get()] == "nemotron" else "https://huggingface.co/pyannote/speaker-diarization-community-1")).pack(anchor="w", pady=5)
+    token_original = secrets_store.get_api_key("huggingface") or ""
+    token_frame = ctk.CTkFrame(frame, fg_color="transparent")
+    token_frame.pack(fill="x")
+    token_label = ctk.CTkLabel(token_frame, text="Token Hugging Face — somente Community-1", anchor="w")
+    token_label.pack(fill="x", pady=(10, 4))
+    token = ctk.CTkEntry(token_frame, show="•")
+    token.insert(0, token_original)
+    token.pack(fill="x")
+    def select_engine(_=None):
+        community = engines[engine.get()] == "community-1"
+        allowed = {"auto", "cpu", "cuda", "openvino", "directml"} if community else {"auto", "cpu", "vulkan"}
+        choices = [label for label, value in backends.items() if value in allowed]
+        backend.configure(values=choices)
+        if backend.get() not in choices:
+            backend.set(choices[0])
+        for key in ("diarization_num_speakers", "diarization_min_speakers", "diarization_max_speakers"):
+            fields[key].configure(state="normal" if community else "disabled")
+        token.configure(state="normal" if community else "disabled")
+        if community:
+            if not token_frame.winfo_manager():
+                token_frame.pack(fill="x", before=setup_status)
+        else:
+            token_frame.pack_forget()
+        token_label.configure(text_color=COLOR_TEXT_MAIN if community else COLOR_TEXT_MUTED)
+        model_hint.configure(text=("Community-1: aceite as condições na página do modelo e configure\num token para o primeiro download. Depois, funciona offline." if community else "Nemotron 3: preparo sem conta ou token. Estima até 8 falantes\nautomaticamente; a contagem acima é usada apenas pelo Community-1.\nCPU e GPU Vulkan são medidas antes da seleção automática."))
+    engine.configure(command=select_engine)
+    select_engine()
+    setup_status = ctk.CTkLabel(frame, text="", wraplength=530, justify="left", text_color=COLOR_TEXT_MUTED)
+    setup_status.pack(fill="x", pady=5)
+    prepare_button = ctk.CTkButton(frame, text="Preparar modelos")
+    prepare_button.pack(anchor="w", pady=(4, 12))
+
+    def collect():
+        result = {key: widget.get().strip() for key, widget in fields.items() if key not in mappings and key != "hf_token"}
+        for key, mapping in mappings.items():
+            result[key] = mapping[fields[key].get()]
+        result["diarization_backend"] = backends[backend.get()]
+        result["diarization_engine"] = engines[engine.get()]
+        result["meeting_timestamp_provider"] = "local" if timing.get() == "Whisper local" else "whisper-1"
+        result["meeting_show_overlay"] = overlay.get()
+        result["diarization_num_speakers"] = int(result["diarization_num_speakers"])
+        if result["diarization_engine"] == "nemotron":
+            for key in ("diarization_num_speakers", "diarization_min_speakers", "diarization_max_speakers"):
+                result[key] = 0
+        validated = AppConfig(**AppConfig._sanitize({**asdict(config), **result}))
+        validate_hotkeys(validated)
+        return result
+
+    def prepare():
+        try:
+            setup = getattr(root, "_model_setup", None)
+            if setup and setup[0].poll() is None:
+                return
+            updated = AppConfig(**AppConfig._sanitize({**asdict(config), **collect()}))
+            if updated.diarization_engine == "community-1" and token.get().strip() != token_original:
+                setup_status.configure(text="Salve o token Hugging Face antes de preparar os modelos.", text_color=COLOR_DANGER)
+                return
+            setup_dir = Path(tempfile.mkdtemp(prefix="setup-", dir=data_dir()))
+            setup_config = setup_dir / "config.json"
+            setup_progress = setup_dir / "progress.json"
+            updated.save(setup_config)
+            project_root = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[2]
+            with (setup_dir / "setup.log").open("ab") as log:
+                from whisper_dictation.child_job import ChildJob
+                job = ChildJob()
+                proc = subprocess.Popen(runtime_command(project_root, "--prepare-models", "--config-path", str(setup_config), "--progress-file", str(setup_progress)),
+                                        stdout=log, stderr=log, creationflags=0x08000000)
+                try:
+                    job.add(proc.pid)
+                except Exception:
+                    proc.terminate()
+                    proc.wait(timeout=10)
+                    job.close()
+                    raise
+                root._model_setup = (proc, job)
+        except Exception as exc:
+            setup_status.configure(text=f"Não foi possível preparar: {exc}", text_color=COLOR_DANGER)
+            return
+        prepare_button.configure(state="disabled")
+        setup_status.configure(text="Preparando modelos…", text_color=COLOR_TEXT_MUTED)
+        def poll():
+            if setup_progress.exists():
+                try:
+                    setup_status.configure(text=json.loads(setup_progress.read_text(encoding="utf-8"))["message"])
+                except (OSError, ValueError, KeyError):
+                    pass
+            if proc.poll() is None:
+                root.after(500, poll)
+            else:
+                job.close()
+                root._model_setup = None
+                prepare_button.configure(state="normal")
+                if proc.returncode:
+                    setup_status.configure(text_color=COLOR_DANGER)
+                    if not setup_progress.exists():
+                        setup_status.configure(text=f"Preparo falhou. Veja {setup_dir / 'setup.log'}")
+                else:
+                    setup_status.configure(text="Modelos preparados. Pronto para identificar falantes.", text_color=COLOR_TEXT_MUTED)
+        root.after(500, poll)
+    prepare_button.configure(command=prepare)
+    collect.token_value = lambda: token.get().strip()
+    collect.token_original = token_original
+    return collect
 
 
 def _persist_keys(current: dict[str, str], original: dict[str, str]) -> None:
@@ -513,7 +787,7 @@ def _persist_keys(current: dict[str, str], original: dict[str, str]) -> None:
             secrets_store.set_api_key(provider, value)
 
 
-def _build_about_tab(tab, context: SettingsContext, heading_font, muted) -> None:
+def _build_about_tab(tab, context: SettingsContext, heading_font, muted, owner=None) -> None:
     brand_frame = ctk.CTkFrame(tab, fg_color="transparent")
     brand_frame.pack(anchor="w", padx=4, pady=(10, 16), fill="x")
 
@@ -556,7 +830,7 @@ def _build_about_tab(tab, context: SettingsContext, heading_font, muted) -> None
         corner_radius=6,
     )
     update_btn.pack(anchor="w", padx=4, pady=(4, 14))
-    _wire_update_button(tab, update_btn, update_status, context)
+    _wire_update_button(tab, update_btn, update_status, context, owner=owner)
 
     tools = ctk.CTkFrame(tab, fg_color="transparent")
     tools.pack(anchor="w", padx=4, fill="x")
@@ -581,22 +855,84 @@ def _build_about_tab(tab, context: SettingsContext, heading_font, muted) -> None
             tools, text="Copiar transcrição", width=150, command=context.copy_last_transcript, **secondary
         ).pack(side="left")
 
+    if context.agents_action:
+        _build_agents_section(tab, context, heading_font, muted, secondary, owner=owner)
 
-def _wire_update_button(parent, button, status, context: SettingsContext) -> None:
+
+def _build_agents_section(tab, context: SettingsContext, heading_font, muted, secondary, owner=None) -> None:
+    """Connect PACE to Claude, Codex and Cursor so they transcribe recordings by themselves."""
+    scheduler = owner if owner is not None else tab
+    ctk.CTkLabel(tab, text="Agentes de IA", font=heading_font, text_color=COLOR_TEXT_MAIN).pack(
+        anchor="w", padx=4, pady=(22, 2))
+    ctk.CTkLabel(
+        tab, justify="left", wraplength=520, text_color=muted,
+        text="Deixa o Claude, o Codex e o Cursor deste computador usarem o PACE sozinhos para transcrever "
+             "e identificar falantes de reuniões, vídeos e áudios do WhatsApp. A chave continua só no PACE.",
+    ).pack(anchor="w", padx=4, pady=(0, 6))
+    status = ctk.CTkLabel(tab, text="", justify="left", wraplength=520, text_color=COLOR_TEXT_MUTED)
+    row = ctk.CTkFrame(tab, fg_color="transparent")
+    row.pack(anchor="w", padx=4, fill="x")
+    status.pack(anchor="w", padx=4, pady=(6, 0))
+    buttons = []
+
+    def run(action: str, busy_text: str) -> None:
+        for button in buttons:
+            button.configure(state="disabled")
+        status.configure(text=busy_text)
+        responses = queue.Queue()
+
+        def worker() -> None:
+            try:
+                responses.put(context.agents_action(action))  # type: ignore[misc]
+            except Exception as exc:
+                responses.put(f"Não foi possível concluir: {exc}")
+
+        def finish() -> None:
+            try:
+                text = responses.get_nowait()
+            except queue.Empty:
+                scheduler.after(150, finish)
+                return
+            for button in buttons:
+                button.configure(state="normal")
+            status.configure(text=text)
+
+        threading.Thread(target=worker, name="AgentsAction", daemon=True).start()
+        scheduler.after(150, finish)
+
+    buttons.append(ctk.CTkButton(row, text="Conectar aos agentes de IA", width=210, fg_color=COLOR_ACCENT,
+                                 hover_color=COLOR_ACCENT_HOVER, corner_radius=6,
+                                 command=lambda: run("connect", "Conectando…")))
+    buttons.append(ctk.CTkButton(row, text="Desconectar", width=110, command=lambda: run("disconnect", "Desconectando…"),
+                                 **secondary))
+    for button in buttons:
+        button.pack(side="left", padx=(0, 8))
+    run("status", "Verificando agentes instalados…")
+
+
+def _wire_update_button(parent, button, status, context: SettingsContext, owner=None) -> None:
     if not context.check_update:
         button.configure(state="disabled")
         status.configure(text="Verificação de atualização indisponível.")
         return
 
+    scheduler = owner if owner is not None else parent
+
     def _apply_update(update: object) -> None:
+        if owner is not None and not owner.can_close():
+            status.configure(text="Aguarde o preparo dos modelos antes de atualizar.")
+            return
         if context.run_update:
-            status.configure(text="Baixando atualização…")
-            button.configure(state="disabled")
-            threading.Thread(target=lambda: context.run_update(update), daemon=True).start()
+            try:
+                context.run_update(update)
+                status.configure(text="Reinício solicitado. Conclua as gravações e a fila se estiverem ativas.")
+            except Exception as exc:
+                status.configure(text=str(exc))
 
     def do_check() -> None:
         button.configure(state="disabled")
-        status.configure(text="Verificando…")
+        status.configure(text="Verificando e preparando atualização…")
+        responses = queue.Queue()
 
         def worker() -> None:
             try:
@@ -605,29 +941,37 @@ def _wire_update_button(parent, button, status, context: SettingsContext) -> Non
             except Exception:
                 update, error = None, True
 
-            def finish() -> None:
+            responses.put((update, error))
+
+        def finish() -> None:
+            try:
+                update, error = responses.get_nowait()
+            except queue.Empty:
+                scheduler.after(100, finish)
+            else:
                 button.configure(state="normal")
                 if error:
                     status.configure(text="Não foi possível verificar agora.")
                 elif update:
                     version = getattr(update, "version", "?")
-                    status.configure(text=f"Atualização disponível: {version}")
-                    button.configure(text="Atualizar agora", command=lambda: _apply_update(update))
+                    status.configure(text=f"Atualização pronta: {version}")
+                    button.configure(text="Reiniciar para atualizar", command=lambda: _apply_update(update))
                 else:
                     status.configure(text="Você já está na versão mais recente.")
 
-            parent.after(0, finish)
-
         threading.Thread(target=worker, daemon=True).start()
+        scheduler.after(100, finish)
 
     button.configure(command=do_check)
 
 
-def _wire_hotkey_capture(parent, button, hotkey_var: tk.StringVar, status) -> None:
+def _wire_hotkey_capture(parent, button, hotkey_var: tk.StringVar, status, owner=None):
     held: set[str] = set()
     capturing = {"on": False}
 
     def start_capture() -> None:
+        if owner is not None and not owner._active:
+            return
         held.clear()
         capturing["on"] = True
         button.configure(text="Pressione as teclas…")
@@ -640,7 +984,7 @@ def _wire_hotkey_capture(parent, button, hotkey_var: tk.StringVar, status) -> No
         button.configure(text="Gravar atalho")
 
     def on_press(event: tk.Event) -> str | None:
-        if not capturing["on"]:
+        if not capturing["on"] or (owner is not None and not owner._active):
             return None
         keysym = event.keysym
         if keysym in _MOD_KEYSYMS:
@@ -666,8 +1010,12 @@ def _wire_hotkey_capture(parent, button, hotkey_var: tk.StringVar, status) -> No
 
     button.configure(command=start_capture)
     top = parent.winfo_toplevel()
-    top.bind("<KeyPress>", on_press, add="+")
-    top.bind("<KeyRelease>", on_release, add="+")
+    press_binding = top.bind("<KeyPress>", on_press, add="+")
+    release_binding = top.bind("<KeyRelease>", on_release, add="+")
+    def cleanup() -> None:
+        top.unbind("<KeyPress>", press_binding)
+        top.unbind("<KeyRelease>", release_binding)
+    return stop_capture, cleanup
 
 
 def _normalize_keysym(keysym: str, char: str) -> str | None:
