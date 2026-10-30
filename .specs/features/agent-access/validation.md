@@ -78,3 +78,27 @@ O que as execuções anteriores revelaram:
 
 Limites: um único Windows (o do host, na sandbox); não cobre Windows 10, CPU sem AVX2 nem usuário sem
 privilégio de administrador (o usuário da sandbox é administrador; o instalador não pede elevação).
+
+## Publicação — 27/10/2026
+
+- PR #1 mesclado em `codex/meeting-recordings` (abc457a; código idêntico ao do build c3f0e7f).
+- Tag anotada `v1.6.0` e release com `Pace_Installer.exe` (409.089.206 bytes, SHA-256
+  `f85d648a9ced1356b7654e3d5a6c0810aa53204d5808220f3cb4cb9307d7e2f6`, igual ao `digest` do GitHub).
+- API pública sem autenticação retorna v1.6.0 com tamanho e digest corretos; download responde 200.
+- O código do atualizador da 1.5.2, executado no host contra o GitHub real, detecta e valida a 1.6.0.
+
+### Verificação na sandbox com o GitHub real (`run_lab.ps1 -Public`)
+
+Não concluída por limitações do ambiente da Windows Sandbox atual, não do PACE:
+
+1. **Smart App Control em modo aplicar** dentro da sandbox (política `VerifiedAndReputableDesktop`)
+   bloqueia o instalador **sem assinatura digital** de qualquer versão do PACE ("Uma política de Controle
+   de Aplicativo bloqueou este arquivo"). Em 25/10 não estava ativo. O script desliga o SAC só na sandbox.
+2. Com o SAC desligado, a 1.5.2 instala, mas a verificação de atualização contra o GitHub real não
+   conclui (cache vazio, sem erro no log em 25 min). Hipótese: raiz da cadeia TLS do GitHub ainda ausente
+   no repositório de certificados do Windows limpo (o Windows baixa raízes sob demanda; o OpenSSL do
+   Python não dispara esse download). Com o GitHub simulado (raiz instalada) o fluxo completo passa.
+
+**Risco real para usuários:** em PCs com Smart App Control ligado (Windows 11 instalado do zero), o
+instalador e os executáveis do PACE sem assinatura são bloqueados. Mitigação: assinar os binários
+(Authenticode, ex.: Azure Trusted Signing). Fora do escopo desta versão.

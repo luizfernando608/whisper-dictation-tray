@@ -5,9 +5,12 @@
 #
 # -Baseline: instalador publicado anterior (padrão: Output\v1.5.2\Pace_Installer.exe, igual ao do GitHub).
 # Resultado: <Output>\report.json, lab.log e evidências (logs de atualização). Código 0 = tudo ok.
+#
+#   scripts\lab\run_lab.ps1 -Public     (após publicar: a versão anterior se atualiza pelo GitHub REAL)
 param(
-    [Parameter(Mandatory = $true)][string]$Candidate,
-    [Parameter(Mandatory = $true)][string]$Next,
+    [string]$Candidate,
+    [string]$Next,
+    [switch]$Public,
     [string]$Baseline,
     [string]$Output,
     [int]$TimeoutMinutes = 75,
@@ -17,6 +20,7 @@ $ErrorActionPreference = "Stop"
 $Repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 if (-not $Baseline) { $Baseline = Join-Path $Repo "Output\v1.5.2\Pace_Installer.exe" }
 if (-not $Output) { $Output = Join-Path $Repo ("Output\lab\run-" + (Get-Date -Format "yyyyMMdd-HHmmss")) }
+if (-not $Public -and (-not $Candidate -or -not $Next)) { throw "Informe -Candidate e -Next, ou use -Public." }
 $Sandbox = Join-Path $env:windir "System32\WindowsSandbox.exe"
 if (-not (Test-Path $Sandbox)) {
     throw "Windows Sandbox não está ativado. Em um PowerShell de administrador: Enable-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -All (e reinicie)."
@@ -28,15 +32,20 @@ if (Get-Process WindowsSandbox, WindowsSandboxClient, WindowsSandboxRemoteSessio
 $Stage = Join-Path $env:TEMP ("pace-lab-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Force $Stage, $Output | Out-Null
 $Output = (Resolve-Path $Output).Path
-foreach ($pair in @(@("baseline", $Baseline), @("candidate", $Candidate), @("next", $Next))) {
+$Installers = New-Object System.Collections.ArrayList  # lista explícita: o PowerShell "desenrola" arrays de um item
+[void]$Installers.Add(@("baseline", $Baseline))
+if (-not $Public) { [void]$Installers.Add(@("candidate", $Candidate)); [void]$Installers.Add(@("next", $Next)) }
+foreach ($pair in $Installers) {
     $source = (Resolve-Path $pair[1]).Path
     New-Item -ItemType Directory -Force (Join-Path $Stage $pair[0]) | Out-Null
     Copy-Item $source (Join-Path $Stage "$($pair[0])\Pace_Installer.exe")
 }
-Copy-Item (Join-Path $PSScriptRoot "in_sandbox.ps1"), (Join-Path $PSScriptRoot "fake_github.ps1") $Stage
+Copy-Item (Join-Path $PSScriptRoot "in_sandbox.ps1"), (Join-Path $PSScriptRoot "in_sandbox_public.ps1"), (Join-Path $PSScriptRoot "fake_github.ps1") $Stage
+$Script = if ($Public) { "in_sandbox_public.ps1" } else { "in_sandbox.ps1" }
 Set-Content (Join-Path $Stage "pace-lab.marker") "Pasta do laboratório PACE (somente sandbox)." -Encoding utf8
 if ($KeepOpen) { Set-Content (Join-Path $Stage "keep-open.flag") "1" }
 
+if (-not $Public) {
 Write-Host "Gerando áudios de teste..." -ForegroundColor Cyan
 & (Join-Path $PSScriptRoot "make_fixtures.ps1") -Output (Join-Path $Stage "fixtures") | Out-Null
 
@@ -53,6 +62,8 @@ if (Test-Path $Models) {
     Copy-Item $Models (Join-Path $Stage "models") -Recurse
 }
 
+}
+
 $Config = @"
 <Configuration>
   <VGpu>Disable</VGpu>
@@ -66,7 +77,7 @@ $Config = @"
     <MappedFolder><HostFolder>$Output</HostFolder><SandboxFolder>C:\results</SandboxFolder><ReadOnly>false</ReadOnly></MappedFolder>
   </MappedFolders>
   <LogonCommand>
-    <Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\lab\in_sandbox.ps1</Command>
+    <Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\lab\$Script</Command>
   </LogonCommand>
 </Configuration>
 "@
