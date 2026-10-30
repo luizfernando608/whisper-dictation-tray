@@ -84,7 +84,7 @@ $Config = @"
 $Wsb = Join-Path $Stage "pace-lab.wsb"
 Set-Content -Path $Wsb -Value $Config -Encoding utf8
 Write-Host "Abrindo a Windows Sandbox (Windows limpo, descartado ao fechar)..." -ForegroundColor Cyan
-Start-Process $Wsb
+Start-Process $Wsb -WindowStyle Hidden
 
 $ReportPath = Join-Path $Output "report.json"
 $Deadline = (Get-Date).AddMinutes($TimeoutMinutes)
@@ -110,7 +110,13 @@ if (-not $KeepOpen) {
     Start-Sleep -Seconds 20
     Get-Process WindowsSandbox, WindowsSandboxClient, WindowsSandboxRemoteSession -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
-Remove-Item $Stage -Recurse -Force -ErrorAction SilentlyContinue
+$ResolvedStage = [IO.Path]::GetFullPath($Stage)
+$TempRoot = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\') + '\'
+if (-not $ResolvedStage.StartsWith($TempRoot, [StringComparison]::OrdinalIgnoreCase) -or
+    (Split-Path $ResolvedStage -Leaf) -notmatch '^pace-lab-[0-9a-f]{8}$') {
+    throw "Pasta temporária fora do laboratório: $ResolvedStage"
+}
+Remove-Item -LiteralPath $ResolvedStage -Recurse -Force -ErrorAction SilentlyContinue
 if (-not $Report -or -not $Report.finished) { Write-Host "O laboratório não terminou no tempo. Veja $Output" -ForegroundColor Red; exit 2 }
 $Failed = @($Report.checks | Where-Object { -not $_.ok })
 Write-Host ""

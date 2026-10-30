@@ -89,7 +89,7 @@ privilégio de administrador (o usuário da sandbox é administrador; o instalad
 
 ### Verificação na sandbox com o GitHub real (`run_lab.ps1 -Public`)
 
-Não concluída por limitações do ambiente da Windows Sandbox atual, não do PACE:
+Execução de 27/10 inconclusiva na Windows Sandbox; causas e hipóteses abaixo:
 
 1. **Smart App Control em modo aplicar** dentro da sandbox (política `VerifiedAndReputableDesktop`)
    bloqueia o instalador **sem assinatura digital** de qualquer versão do PACE ("Uma política de Controle
@@ -102,3 +102,11 @@ Não concluída por limitações do ambiente da Windows Sandbox atual, não do P
 **Risco real para usuários:** em PCs com Smart App Control ligado (Windows 11 instalado do zero), o
 instalador e os executáveis do PACE sem assinatura são bloqueados. Mitigação: assinar os binários
 (Authenticode, ex.: Azure Trusted Signing). Fora do escopo desta versão.
+
+## Fechamento — 30/10/2026
+
+Atualização pública real da instalação de desenvolvimento para 1.6.0, conexão dos
+três agentes instalados, MCP, OGG/MP4 offline, exportações e preservação dos dados
+verificados. A Sandbox com políticas originais bloqueou a instalação sem assinatura;
+esse cenário permanece uma limitação documentada. Condições, normalização dos
+caminhos locais e evidências em [finalization-2026-10-30.md](finalization-2026-10-30.md).
