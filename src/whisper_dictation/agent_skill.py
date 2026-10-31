@@ -1,4 +1,4 @@
-"""Agent Skill installed by "Conectar aos agentes de IA" (Claude Code and Codex).
+"""Agent Skill installed by "Conectar aos agentes de IA" (Claude Code, Codex and Antigravity).
 
 The MCP server tells agents *what* PACE can do; this skill tells them *when* to
 use it and what to do with the transcript. ``{cli}`` and ``{version}`` are
