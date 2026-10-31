@@ -192,11 +192,44 @@ class EmbeddedSettingsTests(unittest.TestCase):
         self.assertTrue(self.root.winfo_exists())
         self.assertEqual(self.errors, [])
 
+    def agents_action(self, action):
+        connected = action == "connect"
+        found = {"claude-desktop": {"label": "Claude Desktop", "installed": True, "connected": connected},
+                 "cursor": {"label": "Cursor", "installed": False, "connected": False},
+                 "antigravity": {"label": "Antigravity", "installed": True, "connected": connected}}
+        report = {name: {"label": item["label"], "ok": True, "changed": True}
+                  for name, item in found.items() if item["installed"] and action != "status"}
+        return {"agents": found, "report": report}
+
+    def labels(self, parent):
+        return [w.cget("text") for w in descendants(parent) if isinstance(w, ctk.CTkLabel)]
+
+    def test_agents_have_their_own_tab_with_a_state_per_agent(self):
+        self.build()
+        tabview = next(w for w in descendants(self.frame) if isinstance(w, ctk.CTkTabview))
+        self.assertNotIn("Agentes de IA", tabview._name_list)
+        self.frame.destroy()
+        self.build(settings_window.SettingsContext(commit_settings=self.saved, agents_action=self.agents_action))
+        tabview = next(w for w in descendants(self.frame) if isinstance(w, ctk.CTkTabview))
+        self.assertEqual(tabview._name_list[-2:], ["Agentes de IA", "Sobre"])
+        page = tabview.tab("Agentes de IA")
+        self.pump(400)
+        labels = self.labels(page)
+        for text in ("Claude Desktop", "Cursor", "Antigravity", "Não conectado", "Não instalado"):
+            self.assertIn(text, labels)
+        self.assertNotIn("Conectar", [w.cget("text") for w in descendants(tabview.tab("Sobre")) if isinstance(w, ctk.CTkButton)])
+        self.button("Conectar").invoke()
+        self.pump(400)
+        labels = self.labels(page)
+        self.assertEqual(labels.count("Conectado"), 2)
+        self.assertIn("Feche e abra o Claude Desktop e o Antigravity para eles enxergarem o PACE.", labels)
+        self.assertEqual(self.errors, [])
+
     def test_settings_controls_fit_main_content_pane_at_minimum_size_and_scaled_dpi(self):
         with patch("customtkinter.ScalingTracker.get_window_dpi_scaling", return_value=1):
             close_window(self.root)
             self.root = ctk.CTk()
-            self.build()
+            self.build(settings_window.SettingsContext(commit_settings=self.saved, agents_action=self.agents_action))
             self.root.deiconify()
             self.root.update()
             tabview = next(w for w in descendants(self.frame) if isinstance(w, ctk.CTkTabview))
@@ -219,7 +252,7 @@ class EmbeddedSettingsTests(unittest.TestCase):
                             self.assertGreaterEqual(widget.winfo_rooty(), top, detail)
                             self.assertLessEqual(widget.winfo_rootx() + widget.winfo_width(), right, detail)
                             self.assertLessEqual(widget.winfo_rooty() + widget.winfo_height(), bottom, detail)
-                        for page in ("Transcrição", "Áudio", "Atalho", "Sobre"):
+                        for page in ("Transcrição", "Áudio", "Atalho", "Agentes de IA", "Sobre"):
                             tabview.set(page)
                             self.pump()
                             # Under load the tab timer and quit timer can run in

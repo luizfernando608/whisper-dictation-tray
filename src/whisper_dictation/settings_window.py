@@ -37,6 +37,7 @@ COLOR_ACCENT_HOVER = "#1D4ED8"     # Electric PACE Blue hover
 COLOR_TEXT_MAIN = "#F8FAFC"        # Off-white crisp text
 COLOR_TEXT_MUTED = "#94A3B8"       # Slate muted label
 COLOR_DANGER = "#EF4444"           # Red warning
+COLOR_SUCCESS = "#22C55E"          # Green connected state
 
 LANGUAGE_OPTIONS = [
     ("Automático", "auto"),
@@ -113,7 +114,7 @@ _KEYSYM_MAP = {
 
 @dataclass
 class SettingsContext:
-    """Optional hooks the tray app injects so the "Sobre" tab can act on it."""
+    """Optional hooks the tray app injects so the "Sobre" and "Agentes de IA" tabs can act on it."""
 
     version: str = __version__
     open_logs: Callable[[], None] | None = None
@@ -124,8 +125,9 @@ class SettingsContext:
     run_update: Callable[[object], None] | None = None
     can_save: Callable[[], bool] | None = None
     commit_settings: Callable[[AppConfig, dict[str, str]], bool] | None = None
-    # "status" | "connect" | "disconnect" -> human-readable report (runs off the UI thread)
-    agents_action: Callable[[str], str] | None = None
+    # "status" | "connect" | "disconnect" -> {"agents": agents.status(), "report": per-agent outcome}
+    # (runs off the UI thread)
+    agents_action: Callable[[str], dict] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,7 +271,6 @@ def _run_window(config: AppConfig, on_save: SaveCallback, context: SettingsConte
 
 
 def _build_settings_contents(root: SettingsFrame, config: AppConfig, on_save: SaveCallback, context: SettingsContext) -> None:
-    heading_font = ctk.CTkFont(size=16, weight="bold")
     hint_font = ctk.CTkFont(size=11)
     muted = COLOR_TEXT_MUTED
 
@@ -334,6 +335,7 @@ def _build_settings_contents(root: SettingsFrame, config: AppConfig, on_save: Sa
     tab_audio = tabview.add("Áudio")
     tab_hotkey = tabview.add("Atalho")
     tab_meeting = tabview.add("Reuniões")
+    tab_agents = tabview.add("Agentes de IA") if context.agents_action else None
     tab_about = tabview.add("Sobre")
 
     # =========================== TRANSCRIÇÃO ===========================
@@ -518,8 +520,12 @@ def _build_settings_contents(root: SettingsFrame, config: AppConfig, on_save: Sa
     root._cleanup_callbacks.append(cleanup)
     collect_meeting = _build_meeting_tab(tab_meeting, config, menu_style, root)
 
+    # ========================== AGENTES DE IA =========================
+    if tab_agents is not None:
+        _build_agents_tab(tab_agents, context, muted, owner=root)
+
     # ============================== SOBRE =============================
-    _build_about_tab(tab_about, context, heading_font, muted, owner=root)
+    _build_about_tab(tab_about, context, muted, owner=root)
 
     # ============================== RODAPÉ ============================
     footer = ctk.CTkFrame(root, fg_color="transparent")
@@ -787,7 +793,17 @@ def _persist_keys(current: dict[str, str], original: dict[str, str]) -> None:
             secrets_store.set_api_key(provider, value)
 
 
-def _build_about_tab(tab, context: SettingsContext, heading_font, muted, owner=None) -> None:
+_SECONDARY_BUTTON = {
+    "fg_color": COLOR_CONTROL_BG,
+    "hover_color": COLOR_CONTROL_HOVER,
+    "border_color": COLOR_BORDER,
+    "border_width": 1,
+    "text_color": COLOR_TEXT_MAIN,
+    "corner_radius": 6,
+}
+
+
+def _build_about_tab(tab, context: SettingsContext, muted, owner=None) -> None:
     brand_frame = ctk.CTkFrame(tab, fg_color="transparent")
     brand_frame.pack(anchor="w", padx=4, pady=(10, 16), fill="x")
 
@@ -834,14 +850,7 @@ def _build_about_tab(tab, context: SettingsContext, heading_font, muted, owner=N
 
     tools = ctk.CTkFrame(tab, fg_color="transparent")
     tools.pack(anchor="w", padx=4, fill="x")
-    secondary = {
-        "fg_color": COLOR_CONTROL_BG,
-        "hover_color": COLOR_CONTROL_HOVER,
-        "border_color": COLOR_BORDER,
-        "border_width": 1,
-        "text_color": COLOR_TEXT_MAIN,
-        "corner_radius": 6,
-    }
+    secondary = _SECONDARY_BUTTON
     if context.open_logs:
         ctk.CTkButton(tools, text="Abrir logs", width=100, command=context.open_logs, **secondary).pack(
             side="left", padx=(0, 8)
@@ -855,59 +864,97 @@ def _build_about_tab(tab, context: SettingsContext, heading_font, muted, owner=N
             tools, text="Copiar transcrição", width=150, command=context.copy_last_transcript, **secondary
         ).pack(side="left")
 
-    if context.agents_action:
-        _build_agents_section(tab, context, heading_font, muted, secondary, owner=owner)
 
+def _build_agents_tab(tab, context: SettingsContext, muted, owner=None) -> None:
+    """Connect PACE to the AI agents on this computer and show each one's state."""
+    from whisper_dictation import agents
 
-def _build_agents_section(tab, context: SettingsContext, heading_font, muted, secondary, owner=None) -> None:
-    """Connect PACE to Claude, Codex and Cursor so they transcribe recordings by themselves."""
     scheduler = owner if owner is not None else tab
-    ctk.CTkLabel(tab, text="Agentes de IA", font=heading_font, text_color=COLOR_TEXT_MAIN).pack(
-        anchor="w", padx=4, pady=(22, 2))
     ctk.CTkLabel(
-        tab, justify="left", wraplength=520, text_color=muted,
-        text="Deixa o Claude, o Codex e o Cursor deste computador usarem o PACE sozinhos para transcrever "
-             "e identificar falantes de reuniões, vídeos e áudios do WhatsApp. A chave continua só no PACE.",
-    ).pack(anchor="w", padx=4, pady=(0, 6))
-    status = ctk.CTkLabel(tab, text="", justify="left", wraplength=520, text_color=COLOR_TEXT_MUTED)
-    row = ctk.CTkFrame(tab, fg_color="transparent")
-    row.pack(anchor="w", padx=4, fill="x")
-    status.pack(anchor="w", padx=4, pady=(6, 0))
+        tab, justify="left", wraplength=540, text_color=muted,
+        text="Uma vez conectados, o Claude, o Codex, o Cursor e o Antigravity deste computador transcrevem "
+             "e identificam falantes pelo PACE sozinhos. A chave fica só no PACE.",
+    ).pack(anchor="w", padx=4, pady=(10, 12))
+    table = ctk.CTkFrame(tab, fg_color=COLOR_CONTROL_BG, border_color=COLOR_BORDER, border_width=1, corner_radius=8)
+    table.pack(anchor="w", padx=4, fill="x")
+    table.grid_columnconfigure(1, weight=1)
+    checking = ctk.CTkLabel(table, text="Verificando agentes instalados…", text_color=muted)
+    checking.grid(row=0, column=0, columnspan=2, sticky="w", padx=14, pady=10)
+    rows: dict[str, ctk.CTkLabel] = {}
+    states = {"connected": ("Conectado", COLOR_SUCCESS), "available": ("Não conectado", COLOR_TEXT_MAIN),
+              "missing": ("Não instalado", muted)}
+
+    def show_agents(found: dict) -> None:
+        checking.grid_forget()
+        for index, (name, item) in enumerate(found.items()):
+            if name not in rows:
+                pady = (10 if index == 0 else 3, 10 if index == len(found) - 1 else 3)
+                ctk.CTkLabel(table, text=item["label"], text_color=COLOR_TEXT_MAIN).grid(
+                    row=index, column=0, sticky="w", padx=(14, 24), pady=pady)
+                rows[name] = ctk.CTkLabel(table, text="")
+                rows[name].grid(row=index, column=1, sticky="w", pady=pady)
+            key = "connected" if item["connected"] else ("available" if item["installed"] else "missing")
+            text, color = states[key]
+            rows[name].configure(text=text, text_color=color)
+
+    buttons_row = ctk.CTkFrame(tab, fg_color="transparent")
+    buttons_row.pack(anchor="w", padx=4, pady=(14, 0), fill="x")
+    message = ctk.CTkLabel(tab, text="", justify="left", wraplength=540, text_color=muted)
+    message.pack(anchor="w", padx=4, pady=(10, 0))
     buttons = []
+
+    def summary(action: str, found: dict, report: dict) -> str:
+        if action == "status":
+            return "" if any(item["installed"] for item in found.values()) else agents.NO_AGENTS
+        if not report:
+            return agents.NO_AGENTS
+        lines = [f"{item['label']}: {item.get('error')}" for item in report.values() if not item.get("ok")]
+        if action == "connect":
+            lines.append(agents.restart_notice(report) or ("" if lines else "Pronto: os agentes já podem usar o PACE."))
+        elif not lines:
+            lines.append("PACE desconectado dos agentes.")
+        return "\n".join(line for line in lines if line)
 
     def run(action: str, busy_text: str) -> None:
         for button in buttons:
             button.configure(state="disabled")
-        status.configure(text=busy_text)
+        message.configure(text=busy_text, text_color=muted)
         responses = queue.Queue()
 
         def worker() -> None:
             try:
                 responses.put(context.agents_action(action))  # type: ignore[misc]
             except Exception as exc:
-                responses.put(f"Não foi possível concluir: {exc}")
+                responses.put(exc)
 
         def finish() -> None:
             try:
-                text = responses.get_nowait()
+                result = responses.get_nowait()
             except queue.Empty:
                 scheduler.after(150, finish)
                 return
             for button in buttons:
                 button.configure(state="normal")
-            status.configure(text=text)
+            if isinstance(result, Exception):
+                message.configure(text=f"Não foi possível concluir: {result}", text_color=COLOR_DANGER)
+                return
+            show_agents(result["agents"])
+            failed = any(not item.get("ok") for item in result["report"].values())
+            message.configure(text=summary(action, result["agents"], result["report"]),
+                              text_color=COLOR_DANGER if failed else COLOR_TEXT_MAIN)
 
         threading.Thread(target=worker, name="AgentsAction", daemon=True).start()
         scheduler.after(150, finish)
 
-    buttons.append(ctk.CTkButton(row, text="Conectar aos agentes de IA", width=210, fg_color=COLOR_ACCENT,
-                                 hover_color=COLOR_ACCENT_HOVER, corner_radius=6,
+    buttons.append(ctk.CTkButton(buttons_row, text="Conectar", width=140, fg_color=COLOR_ACCENT,
+                                 hover_color=COLOR_ACCENT_HOVER, text_color="#FFFFFF",
+                                 font=ctk.CTkFont(size=12, weight="bold"), corner_radius=6,
                                  command=lambda: run("connect", "Conectando…")))
-    buttons.append(ctk.CTkButton(row, text="Desconectar", width=110, command=lambda: run("disconnect", "Desconectando…"),
-                                 **secondary))
+    buttons.append(ctk.CTkButton(buttons_row, text="Desconectar", width=120,
+                                 command=lambda: run("disconnect", "Desconectando…"), **_SECONDARY_BUTTON))
     for button in buttons:
         button.pack(side="left", padx=(0, 8))
-    run("status", "Verificando agentes instalados…")
+    run("status", "")
 
 
 def _wire_update_button(parent, button, status, context: SettingsContext, owner=None) -> None:
