@@ -19,7 +19,7 @@ EPILOG = """exemplos:
   pace-cli transcribe aula.m4a --no-wait          (devolve o id na hora)
   pace-cli wait <id> --timeout 600
   pace-cli result <id> --format srt --output legenda.srt
-  pace-cli agents connect                         (registra o PACE no Claude, Codex, Cursor)
+  pace-cli agents connect                         (registra no Claude, Codex, Cursor, Antigravity)
 
 Formatos aceitos: wav mp3 m4a ogg opus flac aac mp4 mkv webm mov e outros com áudio.
 A transcrição usa a chave do Groq configurada no PACE (ou --local, offline) e identifica
@@ -82,7 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     agents = commands.add_parser("agents", help="conecta o PACE aos agentes de IA instalados")
     agents.add_argument("action", choices=("status", "connect", "disconnect"))
-    agents.add_argument("--target", action="append", help="claude-code, claude-desktop, codex ou cursor (padrão: todos detectados)")
+    agents.add_argument("--target", action="append", help="claude-code, claude-desktop, codex, cursor ou antigravity (padrão: todos detectados)")
     agents.add_argument("--all", action="store_true", help="em disconnect, remove de todos")
     agents.add_argument("--json", action="store_true")
     agents.add_argument("--quiet", "-q", action="store_true")

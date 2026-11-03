@@ -363,7 +363,7 @@ class AgentsTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name) / "Usuária"
-        for folder in (".claude", ".codex", ".cursor", "AppData/Roaming/Claude"):
+        for folder in (".claude", ".codex", ".cursor", ".gemini/antigravity", "AppData/Roaming/Claude"):
             (self.home / folder).mkdir(parents=True)
         (self.home / ".claude.json").write_text(json.dumps({"numStartups": 9, "mcpServers": {"other": {"command": "x"}}}), encoding="utf-8")
         (self.home / ".codex" / "config.toml").write_text('model = "gpt-5"\n\n[mcp_servers.node]\ncommand = "node"\n', encoding="utf-8")
@@ -389,7 +389,9 @@ class AgentsTests(unittest.TestCase):
         self.assertEqual(desktop["preferences"], {"theme": "dark"})
         self.assertEqual(desktop["mcpServers"]["pace"]["args"], ["mcp"])
         self.assertEqual(json.loads((self.home / ".cursor/mcp.json").read_text(encoding="utf-8"))["mcpServers"]["pace"]["command"], self.cli)
-        for folder in (".claude/skills", ".codex/skills"):
+        self.assertEqual(json.loads((self.home / ".gemini/config/mcp_config.json").read_text(encoding="utf-8"))["mcpServers"]["pace"],
+                         {"command": self.cli, "args": ["mcp"]})
+        for folder in (".claude/skills", ".codex/skills", ".gemini/config/skills"):
             skill = (self.home / folder / "pace-transcricao" / "SKILL.md").read_text(encoding="utf-8")
             self.assertTrue(skill.startswith("---\nname: pace-transcricao\n"))
             self.assertIn(MARKER, skill)
@@ -406,6 +408,7 @@ class AgentsTests(unittest.TestCase):
         self.assertEqual((self.home / ".codex/config.toml").read_text(encoding="utf-8"), 'model = "gpt-5"\n\n[mcp_servers.node]\ncommand = "node"\n')
         self.assertNotIn("pace", json.loads(self.desktop.read_text(encoding="utf-8"))["mcpServers"])
         self.assertFalse((self.home / ".claude/skills/pace-transcricao").exists())
+        self.assertFalse((self.home / ".gemini/config/skills/pace-transcricao").exists())
         self.assertFalse(any(item["connected"] for item in agents.status(self.install, self.env).values()))
 
     def test_foreign_entries_files_and_invalid_configs_are_never_overwritten(self):
@@ -431,7 +434,7 @@ class AgentsTests(unittest.TestCase):
         self.assertFalse((Path(self.temp.name) / "vazio" / ".claude.json").exists())
         agents.connect(self.install, env=self.env, version="1.6.0")
         backups = list((self.home / "AppData/Local/PaceData/agents/backups").iterdir())
-        self.assertEqual(len(backups), 3)  # .claude.json, config.toml, desktop config (cursor had no file)
+        self.assertEqual(len(backups), 3)  # .claude.json, config.toml, desktop config (cursor/antigravity had no file)
 
     def test_refresh_after_update_rewrites_only_connected_agents(self):
         agents.connect(self.install, ["codex"], env=self.env, version="1.6.0")
@@ -455,6 +458,102 @@ class AgentsTests(unittest.TestCase):
         self.assertEqual(calls[1][1:6], ["mcp", "add-json", "--scope", "user", "pace"])
         self.assertEqual(json.loads(calls[1][6]), {"type": "stdio", "command": self.cli, "args": ["mcp"]})
 
+
+
+class AntigravityTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name) / "Usuária"
+        self.gemini = self.home / ".gemini"
+        (self.gemini / "antigravity").mkdir(parents=True)
+        self.legacy = self.gemini / "antigravity" / "mcp_config.json"
+        self.legacy.write_bytes(b"")  # Antigravity ships this file empty
+        self.config = self.gemini / "config" / "mcp_config.json"
+        self.skill = self.gemini / "config" / "skills" / "pace-transcricao" / "SKILL.md"
+        self.env = agents.Environment(home=self.home, appdata=self.home / "AppData/Roaming",
+                                      localappdata=self.home / "AppData/Local", claude_cli=False)
+        self.install = Path(r"C:\Users\Usuária\AppData\Local\Pace")
+        self.cli = str(self.install / "pace-cli.exe")
+
+    def read(self, path):
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_detected_by_its_folder_and_gemini_home_is_injectable(self):
+        self.assertEqual([name for name, found in agents.detect(self.env).items() if found], ["antigravity"])
+        elsewhere = agents.Environment(home=self.home, appdata=self.home / "r", localappdata=self.home / "l",
+                                       claude_cli=False, gemini_home=Path(self.temp.name) / "outro")
+        self.assertFalse(agents.detect(elsewhere)["antigravity"])
+
+    def test_connect_treats_empty_file_as_empty_and_installs_skill(self):
+        report = agents.connect(self.install, env=self.env, version="1.6.1")
+        self.assertEqual(list(report), ["antigravity"])
+        self.assertTrue(report["antigravity"]["ok"] and report["antigravity"]["changed"], report)
+        self.assertEqual(report["antigravity"]["note"], "Reinicie o Antigravity para ver o PACE.")
+        for path in (self.config, self.legacy):
+            self.assertEqual(self.read(path), {"mcpServers": {"pace": {"command": self.cli, "args": ["mcp"]}}})
+        skill = self.skill.read_text(encoding="utf-8")
+        self.assertTrue(skill.startswith("---\nname: pace-transcricao\n"))
+        self.assertIn(MARKER, skill)
+        self.assertIn(self.cli, skill)
+        self.assertTrue(agents.status(self.install, self.env)["antigravity"]["connected"])
+        self.assertEqual(agents.restart_notice(report), "Feche e abra o Antigravity para ele enxergar o PACE.")
+        self.assertFalse(agents.connect(self.install, env=self.env, version="1.6.1")["antigravity"]["changed"])
+
+    def test_other_servers_and_settings_are_preserved(self):
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps({"mcpServers": {"github": {"command": "gh", "args": ["mcp"]}}, "x": 1}), encoding="utf-8")
+        agents.connect(self.install, env=self.env, version="1.6.1")
+        data = self.read(self.config)
+        self.assertEqual(data["x"], 1)
+        self.assertEqual(data["mcpServers"]["github"], {"command": "gh", "args": ["mcp"]})
+        self.assertIn("pace", data["mcpServers"])
+        report = agents.disconnect(self.install, env=self.env)
+        self.assertTrue(report["antigravity"]["ok"], report)
+        self.assertEqual(self.read(self.config), {"mcpServers": {"github": {"command": "gh", "args": ["mcp"]}}, "x": 1})
+        self.assertEqual(self.read(self.legacy), {"mcpServers": {}})
+        self.assertFalse(self.skill.parent.exists())
+        self.assertFalse(agents.status(self.install, self.env)["antigravity"]["connected"])
+        backups = (self.home / "AppData/Local/PaceData/agents/backups")
+        for folder in ("config", "antigravity"):  # same file name, separate backups
+            self.assertTrue(list(backups.glob(f"antigravity-{folder}-mcp_config.json-*")), folder)
+
+    def test_foreign_pace_server_is_never_overwritten(self):
+        self.config.parent.mkdir(parents=True)
+        foreign = {"mcpServers": {"pace": {"command": "node", "args": ["outro-pace.js"]}}}
+        self.config.write_text(json.dumps(foreign), encoding="utf-8")
+        report = agents.connect(self.install, env=self.env, version="1.6.1")
+        self.assertFalse(report["antigravity"]["ok"])
+        self.assertIn("não é do PACE", report["antigravity"]["error"])
+        self.assertEqual(self.read(self.config), foreign)
+        self.assertFalse(agents.status(self.install, self.env)["antigravity"]["connected"])
+        self.assertEqual(agents.restart_notice(report), "")
+        agents.disconnect(self.install, ["antigravity"], env=self.env)
+        self.assertEqual(self.read(self.config), foreign)
+
+    def test_foreign_pace_in_legacy_file_leaves_everything_untouched(self):
+        foreign = {"mcpServers": {"pace": {"command": "node", "args": ["outro-pace.js"]}}}
+        self.legacy.write_text(json.dumps(foreign), encoding="utf-8")
+        report = agents.connect(self.install, env=self.env, version="1.6.1")
+        self.assertFalse(report["antigravity"]["ok"])
+        self.assertEqual(self.read(self.legacy), foreign)
+        self.assertFalse(self.config.exists())
+        self.assertFalse(self.skill.exists())
+
+    def test_refresh_after_update_rewrites_paths_and_skill(self):
+        agents.connect(self.install, env=self.env, version="1.6.1")
+        self.assertEqual(agents.refresh(self.install, env=self.env, version="1.6.1"), {})
+        moved = Path(r"D:\Apps\Pace")
+        report = agents.refresh(moved, env=self.env, version="1.7.0")
+        self.assertEqual(list(report), ["antigravity"])
+        self.assertEqual(self.read(self.config)["mcpServers"]["pace"]["command"], str(moved / "pace-cli.exe"))
+        self.assertIn("v1.7.0", self.skill.read_text(encoding="utf-8"))
+
+    def test_restart_notice_names_every_app_that_needs_reopening(self):
+        report = {"claude-desktop": {"label": "Claude Desktop", "ok": True},
+                  "antigravity": {"label": "Antigravity", "ok": True}, "codex": {"label": "Codex", "ok": True}}
+        self.assertEqual(agents.restart_notice(report),
+                         "Feche e abra o Claude Desktop e o Antigravity para eles enxergarem o PACE.")
 
 class TrayCoexistenceTests(unittest.TestCase):
     def setUp(self):

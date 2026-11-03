@@ -78,12 +78,14 @@ def create_settings_context(project_root: Path, config: AppConfig) -> tuple[Save
             updater.prepare_update(update)
         return update
 
-    def agents_action(action: str) -> str:
+    def agents_action(action: str) -> dict:
         from whisper_dictation import agents
-        if action == "status":
-            return agents.describe(agents.status(project_root))
-        report = agents.connect(project_root) if action == "connect" else agents.disconnect(project_root)
-        return agents.describe(report)
+        report = {}
+        if action == "connect":
+            report = agents.connect(project_root)
+        elif action == "disconnect":
+            report = agents.disconnect(project_root)
+        return {"agents": agents.status(project_root), "report": report}
 
     context = SettingsContext(
         version=__version__,

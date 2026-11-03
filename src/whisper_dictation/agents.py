@@ -20,7 +20,10 @@ from pathlib import Path
 from whisper_dictation.agent_skill import MARKER, SKILL_NAME, render as render_skill
 
 SERVER_NAME = "pace"
-LABELS = {"claude-code": "Claude Code", "claude-desktop": "Claude Desktop", "codex": "Codex", "cursor": "Cursor"}
+LABELS = {"claude-code": "Claude Code", "claude-desktop": "Claude Desktop", "codex": "Codex", "cursor": "Cursor",
+          "antigravity": "Antigravity"}
+# Apps that only read their MCP config at startup.
+RESTART_NEEDED = ("claude-desktop", "antigravity")
 _BACKUPS_PER_FILE = 5
 
 
@@ -28,7 +31,8 @@ class Environment:
     """Locations, injectable so tests never touch the real profile."""
 
     def __init__(self, home: Path | None = None, appdata: Path | None = None, localappdata: Path | None = None,
-                 data: Path | None = None, claude_cli: str | None | bool = None, codex_home: Path | None = None):
+                 data: Path | None = None, claude_cli: str | None | bool = None, codex_home: Path | None = None,
+                 gemini_home: Path | None = None):
         self.home = Path(home or Path.home())
         self.appdata = Path(appdata or os.environ.get("APPDATA") or self.home / "AppData" / "Roaming")
         self.localappdata = Path(localappdata or os.environ.get("LOCALAPPDATA") or self.home / "AppData" / "Local")
@@ -36,6 +40,7 @@ class Environment:
         self._claude_cli = claude_cli
         codex = codex_home or (os.environ.get("CODEX_HOME") if home is None else None)
         self.codex_home = Path(codex) if codex else self.home / ".codex"
+        self.gemini_home = Path(gemini_home or self.home / ".gemini")
 
     def claude_cli(self) -> str | None:
         """The `claude` command, when installed; False in tests disables it."""
@@ -56,6 +61,11 @@ class Environment:
         if packages.is_dir():
             folders += sorted(packages.glob("Claude_*/LocalCache/Roaming/Claude"))
         return [folder / "claude_desktop_config.json" for folder in folders if folder.is_dir()]
+
+    def antigravity_configs(self) -> list[Path]:
+        """Documented ~/.gemini/config/mcp_config.json, plus the legacy file when it still exists."""
+        legacy = self.gemini_home / "antigravity" / "mcp_config.json"
+        return [self.gemini_home / "config" / "mcp_config.json"] + ([legacy] if legacy.is_file() else [])
 
 
 def cli_path(project_root: Path) -> Path:
@@ -103,6 +113,13 @@ def _read_json(path: Path) -> dict:
     if not isinstance(data, dict):
         raise ValueError(f"{path} não contém um objeto JSON.")
     return data
+
+
+def _check_server_is_ours(path: Path) -> None:
+    servers = _read_json(path).get("mcpServers")
+    current = servers.get(SERVER_NAME) if isinstance(servers, dict) else None
+    if current is not None and not _ours(current):
+        raise RuntimeError(f"Já existe um servidor MCP chamado '{SERVER_NAME}' em {path} que não é do PACE; não foi alterado.")
 
 
 def _json_set_server(path: Path, env: Environment, target: str, entry: dict | None) -> bool:
@@ -200,6 +217,7 @@ def detect(env: Environment) -> dict[str, bool]:
         "claude-desktop": bool(env.desktop_configs()),
         "codex": env.codex_home.is_dir(),
         "cursor": (env.home / ".cursor").is_dir(),
+        "antigravity": (env.gemini_home / "antigravity").is_dir(),
     }
 
 
@@ -259,6 +277,19 @@ def _apply(target: str, env: Environment, cli: Path | None, version: str) -> dic
         path = env.home / ".cursor" / "mcp.json"
         return {"changed": _json_set_server(path, env, target, server_entry(cli) if cli is not None else None),
                 "files": [str(path)]}
+    if target == "antigravity":
+        files = env.antigravity_configs()
+        changed = False
+        for path in files:  # refuse before writing anything if either file holds someone else's "pace"
+            _check_server_is_ours(path)
+        for path in files:
+            changed = _json_set_server(path, env, f"{target}-{path.parent.name}",  # both files are mcp_config.json
+                                       server_entry(cli) if cli is not None else None) or changed
+        skills = env.gemini_home / "config" / "skills"
+        skill_changed = _write_skill(skills, cli, version) if cli is not None else _remove_skill(skills)
+        return {"changed": changed or skill_changed,
+                "files": [str(path) for path in files] + [str(skills / SKILL_NAME / "SKILL.md")],
+                "note": "Reinicie o Antigravity para ver o PACE." if changed else ""}
     raise ValueError(f"Agente desconhecido: {target}. Use: {', '.join(LABELS)}.")
 
 
@@ -342,9 +373,20 @@ def refresh(project_root: Path, env: Environment | None = None, version: str | N
     return connect(project_root, stale, env, version) if stale else {}
 
 
+NO_AGENTS = "Nenhum agente de IA encontrado (Claude Code, Claude Desktop, Codex, Cursor ou Antigravity)."
+
+
+def restart_notice(report: dict) -> str:
+    """Ask to reopen the apps that only see a new MCP server after a restart."""
+    names = [report[name]["label"] for name in RESTART_NEEDED if report.get(name, {}).get("ok")]
+    if not names:
+        return ""
+    return f"Feche e abra o {' e o '.join(names)} para {'ele enxergar' if len(names) == 1 else 'eles enxergarem'} o PACE."
+
+
 def describe(report: dict) -> str:
     if not report:
-        return "Nenhum agente de IA encontrado (Claude Code, Claude Desktop, Codex ou Cursor)."
+        return NO_AGENTS
     lines = []
     for name, item in report.items():
         if "installed" in item:
