@@ -116,8 +116,11 @@ def _read_json(path: Path) -> dict:
 
 
 def _check_server_is_ours(path: Path) -> None:
+    """Raise, without writing, for whatever _json_set_server would refuse in this file."""
     servers = _read_json(path).get("mcpServers")
-    current = servers.get(SERVER_NAME) if isinstance(servers, dict) else None
+    if servers is not None and not isinstance(servers, dict):
+        raise ValueError(f"mcpServers inválido em {path}.")
+    current = servers.get(SERVER_NAME) if servers else None
     if current is not None and not _ours(current):
         raise RuntimeError(f"Já existe um servidor MCP chamado '{SERVER_NAME}' em {path} que não é do PACE; não foi alterado.")
 
@@ -183,6 +186,12 @@ def _codex_set_server(path: Path, env: Environment, cli: Path | None) -> bool:
     _backup(path, env, "codex")
     _atomic_write(path, text)
     return True
+
+
+def _check_skill_is_ours(folder: Path) -> None:
+    path = folder / SKILL_NAME / "SKILL.md"
+    if path.exists() and MARKER not in path.read_text(encoding="utf-8"):
+        raise RuntimeError(f"{path} existe e não foi criado pelo PACE; não foi alterado.")
 
 
 def _write_skill(folder: Path, cli: Path, version: str) -> bool:
@@ -280,12 +289,14 @@ def _apply(target: str, env: Environment, cli: Path | None, version: str) -> dic
     if target == "antigravity":
         files = env.antigravity_configs()
         changed = False
-        for path in files:  # refuse before writing anything if either file holds someone else's "pace"
+        skills = env.gemini_home / "config" / "skills"
+        for path in files:  # refuse before writing anything if a file or the skill is someone else's
             _check_server_is_ours(path)
+        if cli is not None:
+            _check_skill_is_ours(skills)
         for path in files:
             changed = _json_set_server(path, env, f"{target}-{path.parent.name}",  # both files are mcp_config.json
                                        server_entry(cli) if cli is not None else None) or changed
-        skills = env.gemini_home / "config" / "skills"
         skill_changed = _write_skill(skills, cli, version) if cli is not None else _remove_skill(skills)
         return {"changed": changed or skill_changed,
                 "files": [str(path) for path in files] + [str(skills / SKILL_NAME / "SKILL.md")],
