@@ -115,6 +115,13 @@ def _read_json(path: Path) -> dict:
     return data
 
 
+def _check_server_is_ours(path: Path) -> None:
+    servers = _read_json(path).get("mcpServers")
+    current = servers.get(SERVER_NAME) if isinstance(servers, dict) else None
+    if current is not None and not _ours(current):
+        raise RuntimeError(f"Já existe um servidor MCP chamado '{SERVER_NAME}' em {path} que não é do PACE; não foi alterado.")
+
+
 def _json_set_server(path: Path, env: Environment, target: str, entry: dict | None) -> bool:
     """Add/replace (entry) or remove (None) mcpServers.pace. True if the file changed."""
     data = _read_json(path)
@@ -273,6 +280,8 @@ def _apply(target: str, env: Environment, cli: Path | None, version: str) -> dic
     if target == "antigravity":
         files = env.antigravity_configs()
         changed = False
+        for path in files:  # refuse before writing anything if either file holds someone else's "pace"
+            _check_server_is_ours(path)
         for path in files:
             changed = _json_set_server(path, env, f"{target}-{path.parent.name}",  # both files are mcp_config.json
                                        server_entry(cli) if cli is not None else None) or changed

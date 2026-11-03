@@ -531,6 +531,15 @@ class AntigravityTests(unittest.TestCase):
         agents.disconnect(self.install, ["antigravity"], env=self.env)
         self.assertEqual(self.read(self.config), foreign)
 
+    def test_foreign_pace_in_legacy_file_leaves_everything_untouched(self):
+        foreign = {"mcpServers": {"pace": {"command": "node", "args": ["outro-pace.js"]}}}
+        self.legacy.write_text(json.dumps(foreign), encoding="utf-8")
+        report = agents.connect(self.install, env=self.env, version="1.6.1")
+        self.assertFalse(report["antigravity"]["ok"])
+        self.assertEqual(self.read(self.legacy), foreign)
+        self.assertFalse(self.config.exists())
+        self.assertFalse(self.skill.exists())
+
     def test_refresh_after_update_rewrites_paths_and_skill(self):
         agents.connect(self.install, env=self.env, version="1.6.1")
         self.assertEqual(agents.refresh(self.install, env=self.env, version="1.6.1"), {})
