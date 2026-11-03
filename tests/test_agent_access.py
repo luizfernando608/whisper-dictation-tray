@@ -553,6 +553,23 @@ class AntigravityTests(unittest.TestCase):
         self.assertEqual(self.legacy.read_bytes(), b"")
         self.assertEqual(self.skill.read_text(encoding="utf-8"), "skill de outra pessoa")
 
+    def test_disconnect_cleans_what_it_can_when_the_legacy_file_became_unreadable(self):
+        agents.connect(self.install, env=self.env, version="1.6.1")
+        self.legacy.write_text("{ isto não é json", encoding="utf-8")
+        report = agents.disconnect(self.install, ["antigravity"], env=self.env)
+        self.assertFalse(report["antigravity"]["ok"])
+        self.assertEqual(self.read(self.config), {"mcpServers": {}})
+        self.assertFalse(self.skill.exists())
+        self.assertEqual(self.legacy.read_text(encoding="utf-8"), "{ isto não é json")
+
+    def test_failed_first_connection_is_undone_so_nothing_is_left_behind(self):
+        with patch.object(agents, "_write_skill", side_effect=PermissionError("somente leitura")):
+            report = agents.connect(self.install, env=self.env, version="1.6.1")
+        self.assertFalse(report["antigravity"]["ok"])
+        self.assertEqual(self.read(self.config), {"mcpServers": {}})
+        self.assertEqual(self.read(self.legacy), {"mcpServers": {}})
+        self.assertFalse(agents.status(self.install, self.env)["antigravity"]["connected"])
+
     def test_refresh_after_update_rewrites_paths_and_skill(self):
         agents.connect(self.install, env=self.env, version="1.6.1")
         self.assertEqual(agents.refresh(self.install, env=self.env, version="1.6.1"), {})
