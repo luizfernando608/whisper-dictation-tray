@@ -540,6 +540,19 @@ class AntigravityTests(unittest.TestCase):
         self.assertFalse(self.config.exists())
         self.assertFalse(self.skill.exists())
 
+    def test_malformed_legacy_servers_or_foreign_skill_leave_everything_untouched(self):
+        self.legacy.write_text(json.dumps({"mcpServers": []}), encoding="utf-8")
+        self.assertFalse(agents.connect(self.install, env=self.env, version="1.6.1")["antigravity"]["ok"])
+        self.assertFalse(self.config.exists())
+        self.legacy.write_bytes(b"")
+        self.skill.parent.mkdir(parents=True)
+        self.skill.write_text("skill de outra pessoa", encoding="utf-8")
+        report = agents.connect(self.install, env=self.env, version="1.6.1")
+        self.assertFalse(report["antigravity"]["ok"])
+        self.assertFalse(self.config.exists())
+        self.assertEqual(self.legacy.read_bytes(), b"")
+        self.assertEqual(self.skill.read_text(encoding="utf-8"), "skill de outra pessoa")
+
     def test_refresh_after_update_rewrites_paths_and_skill(self):
         agents.connect(self.install, env=self.env, version="1.6.1")
         self.assertEqual(agents.refresh(self.install, env=self.env, version="1.6.1"), {})
