@@ -1,5 +1,21 @@
 # Abertura no Windows
 
+## Instalação e caminhos desde 30/10/2026
+
+Oficial em `C:/Users/ziull/AppData/Local/Pace` atualizado pelo pacote público para
+1.6.0; auxiliar confirmou `updated`, binários conferidos com o build publicado.
+Claude Code, Claude Desktop e Codex conectados pelo CLI instalado, com backups e
+conteúdos não relacionados preservados.
+
+Biblioteca ativa agora em `C:/Users/ziull/Documents/PACEData/recordings`; modelos
+em `C:/Users/ziull/Documents/PACEData/models`. A raiz lógica antiga em AppData
+redirecionava novos filhos para o LocalCache MSIX do Codex: `RecordingStore.directory()`
+e `nemotron_diarization._prepared()` recusavam os caminhos divergentes. A cópia para
+raízes explícitas estáveis verificou 288 arquivos da biblioteca e 171 do cache por
+hash; diretórios antigos mantidos, três registros originais preservados. Só os dois
+caminhos foram alterados na configuração. MCP e OGG/MP4 offline passaram depois.
+Detalhes: `.specs/features/agent-access/finalization-2026-10-30.md`.
+
 ## Instalação ativa desde 23/10/2026
 
 Após pedido para deixar somente o oficial, a instalação real em `C:/Users/ziull/AppData/Local/Pace` foi atualizada de 1.4.0 para o pacote público 1.5.2 (SHA do instalador b0573e13d606c835e0be6b75dfd5d1f30f25a1c575b682711f6920ded713b18f; EXE 2af16b5adb5790aabf12741fd4fb7dca67776ad1ecdd460d295a1f7066055274). A prévia foi encerrada e não é mais o alvo ativo. Config/env em uso foram preservados no oficial; biblioteca e modelos continuam nos caminhos existentes.
