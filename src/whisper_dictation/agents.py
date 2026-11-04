@@ -290,14 +290,24 @@ def _apply(target: str, env: Environment, cli: Path | None, version: str) -> dic
         files = env.antigravity_configs()
         changed = False
         skills = env.gemini_home / "config" / "skills"
-        for path in files:  # refuse before writing anything if a file or the skill is someone else's
-            _check_server_is_ours(path)
-        if cli is not None:
+        if cli is None:  # disconnect: clean every file we can, then report the ones we could not
+            errors = []
+            for path in files:
+                try:
+                    changed = _json_set_server(path, env, f"{target}-{path.parent.name}", None) or changed
+                except (OSError, ValueError, RuntimeError) as exc:
+                    errors.append(f"{type(exc).__name__}: {exc}")
+            skill_changed = _remove_skill(skills)
+            if errors:
+                raise RuntimeError("; ".join(errors))
+        else:
+            for path in files:  # refuse before writing anything if a file or the skill is someone else's
+                _check_server_is_ours(path)
             _check_skill_is_ours(skills)
-        for path in files:
-            changed = _json_set_server(path, env, f"{target}-{path.parent.name}",  # both files are mcp_config.json
-                                       server_entry(cli) if cli is not None else None) or changed
-        skill_changed = _write_skill(skills, cli, version) if cli is not None else _remove_skill(skills)
+            for path in files:
+                changed = _json_set_server(path, env, f"{target}-{path.parent.name}",  # both files are mcp_config.json
+                                           server_entry(cli)) or changed
+            skill_changed = _write_skill(skills, cli, version)
         return {"changed": changed or skill_changed,
                 "files": [str(path) for path in files] + [str(skills / SKILL_NAME / "SKILL.md")],
                 "note": "Reinicie o Antigravity para ver o PACE." if changed else ""}
@@ -355,6 +365,11 @@ def connect(project_root: Path, targets=None, env: Environment | None = None, ve
             report[name] = {"label": LABELS[name], "ok": True, **outcome}
         except Exception as exc:
             report[name] = {"label": LABELS[name], "ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            if name not in state["targets"]:
+                try:  # a half-written first connection would be invisible to disconnect; undo what is ours
+                    _apply(name, env, None, "")
+                except Exception:
+                    pass
     _save_state(env, state)
     return report
 
