@@ -194,6 +194,26 @@ def _check_skill_is_ours(folder: Path) -> None:
         raise RuntimeError(f"{path} existe e não foi criado pelo PACE; não foi alterado.")
 
 
+def _snapshot(paths: list[Path]) -> dict[Path, bytes | None]:
+    return {path: (path.read_bytes() if path.is_file() else None) for path in paths}
+
+
+def _restore(snapshot: dict[Path, bytes | None]) -> None:
+    """Put files back exactly as they were; best-effort, never raises."""
+    for path, data in snapshot.items():
+        try:
+            if data is None:
+                path.unlink(missing_ok=True)
+                try:
+                    path.parent.rmdir()
+                except OSError:
+                    pass
+            else:
+                path.write_bytes(data)
+        except OSError:
+            pass
+
+
 def _write_skill(folder: Path, cli: Path, version: str) -> bool:
     path = folder / SKILL_NAME / "SKILL.md"
     content = render_skill(str(cli), version)
@@ -304,10 +324,15 @@ def _apply(target: str, env: Environment, cli: Path | None, version: str) -> dic
             for path in files:  # refuse before writing anything if a file or the skill is someone else's
                 _check_server_is_ours(path)
             _check_skill_is_ours(skills)
-            for path in files:
-                changed = _json_set_server(path, env, f"{target}-{path.parent.name}",  # both files are mcp_config.json
-                                           server_entry(cli)) or changed
-            skill_changed = _write_skill(skills, cli, version)
+            before = _snapshot(files + [skills / SKILL_NAME / "SKILL.md"])
+            try:
+                for path in files:
+                    changed = _json_set_server(path, env, f"{target}-{path.parent.name}",  # both files are mcp_config.json
+                                               server_entry(cli)) or changed
+                skill_changed = _write_skill(skills, cli, version)
+            except Exception:
+                _restore(before)  # half a connection would be invisible to disconnect
+                raise
         return {"changed": changed or skill_changed,
                 "files": [str(path) for path in files] + [str(skills / SKILL_NAME / "SKILL.md")],
                 "note": "Reinicie o Antigravity para ver o PACE." if changed else ""}
@@ -365,11 +390,6 @@ def connect(project_root: Path, targets=None, env: Environment | None = None, ve
             report[name] = {"label": LABELS[name], "ok": True, **outcome}
         except Exception as exc:
             report[name] = {"label": LABELS[name], "ok": False, "error": f"{type(exc).__name__}: {exc}"}
-            if name not in state["targets"]:
-                try:  # a half-written first connection would be invisible to disconnect; undo what is ours
-                    _apply(name, env, None, "")
-                except Exception:
-                    pass
     _save_state(env, state)
     return report
 
