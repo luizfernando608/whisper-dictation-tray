@@ -562,13 +562,28 @@ class AntigravityTests(unittest.TestCase):
         self.assertFalse(self.skill.exists())
         self.assertEqual(self.legacy.read_text(encoding="utf-8"), "{ isto não é json")
 
-    def test_failed_first_connection_is_undone_so_nothing_is_left_behind(self):
+    def test_write_failure_restores_the_files_exactly_as_they_were(self):
+        self.config.parent.mkdir(parents=True)
+        original = {"mcpServers": {"outro": {"command": "x"}}, "n": 1}
+        self.config.write_text(json.dumps(original), encoding="utf-8")
         with patch.object(agents, "_write_skill", side_effect=PermissionError("somente leitura")):
             report = agents.connect(self.install, env=self.env, version="1.6.1")
         self.assertFalse(report["antigravity"]["ok"])
-        self.assertEqual(self.read(self.config), {"mcpServers": {}})
-        self.assertEqual(self.read(self.legacy), {"mcpServers": {}})
+        self.assertEqual(self.read(self.config), original)
+        self.assertEqual(self.legacy.read_bytes(), b"")
         self.assertFalse(agents.status(self.install, self.env)["antigravity"]["connected"])
+
+    def test_refused_connection_keeps_an_existing_pace_entry_of_the_user(self):
+        self.config.parent.mkdir(parents=True)
+        manual = {"mcpServers": {"pace": {"command": r"C:\Antigo\pace-cli.exe", "args": ["mcp"], "env": {"X": "1"}},
+                                 "outro": {"command": "x"}}}
+        self.config.write_text(json.dumps(manual), encoding="utf-8")
+        self.skill.parent.mkdir(parents=True)
+        self.skill.write_text("skill do usuário", encoding="utf-8")
+        report = agents.connect(self.install, env=self.env, version="1.6.1")
+        self.assertFalse(report["antigravity"]["ok"])
+        self.assertEqual(self.read(self.config), manual)
+        self.assertEqual(self.skill.read_text(encoding="utf-8"), "skill do usuário")
 
     def test_refresh_after_update_rewrites_paths_and_skill(self):
         agents.connect(self.install, env=self.env, version="1.6.1")
