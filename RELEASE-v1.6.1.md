@@ -7,3 +7,7 @@
   PACE registra o servidor MCP e a skill `pace-transcricao` e pede para reiniciar o Antigravity. Nunca
   sobrescreve um servidor `pace` que não seja do PACE; arquivos alterados ganham backup.
 - `pace-cli agents --target antigravity` para conectar ou desconectar só ele.
+- **Reuniões gravam a voz dos outros participantes em qualquer saída**: fone com fio, headset
+  Bluetooth (inclusive no modo viva-voz), alto-falante ou monitor. Antes só a saída padrão do Windows
+  era gravada, e quem ouvia a reunião pelo fone perdia o outro lado. Se um fone conectar ou desconectar
+  no meio da reunião, a captura se ajusta sozinha, sem parar a gravação.

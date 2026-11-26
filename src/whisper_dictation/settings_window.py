@@ -640,7 +640,7 @@ def _build_meeting_tab(tab, config, menu_style, root):
     mappings = {}
     for key, label, kind in (("meeting_input_device", "Microfone da reunião", "inputs"), ("meeting_output_device", "Saída de áudio do computador", "outputs")):
         ctk.CTkLabel(frame, text=label, anchor="w").pack(fill="x", pady=(10, 4))
-        choices = {"Padrão do sistema": None}
+        choices = {"Todas as saídas (fone, headset ou alto-falante)" if kind == "outputs" else "Padrão do sistema": None}
         for device in devices[kind]:
             choices[f"{device['name']} [{device['id']}]"] = str(device["id"])
         selected = getattr(config, key)
@@ -654,7 +654,7 @@ def _build_meeting_tab(tab, config, menu_style, root):
         fields[key], mappings[key] = widget, choices
     overlay = tk.BooleanVar(master=tab, value=config.meeting_show_overlay)
     ctk.CTkCheckBox(frame, text="Mostrar cápsula discreta durante a reunião", variable=overlay).pack(anchor="w", pady=14)
-    ctk.CTkLabel(frame, text="Reuniões são gravadas sem limite de tempo e salvas em disco.\nA saída selecionada inclui todos os sons reproduzidos nela.", justify="left", text_color=COLOR_TEXT_MUTED).pack(fill="x")
+    ctk.CTkLabel(frame, text="Reuniões são gravadas sem limite de tempo e salvas em disco.\nEm \"Todas as saídas\", o PACE grava o som de qualquer fone ou alto-falante,\ninclusive se você trocar de dispositivo no meio da reunião.", justify="left", text_color=COLOR_TEXT_MUTED).pack(fill="x")
     folder = entry("meeting_storage_dir", "Pasta da biblioteca (vazio usa a pasta padrão do PACE)", config.meeting_storage_dir)
     def choose_folder():
         value = filedialog.askdirectory(parent=root)
