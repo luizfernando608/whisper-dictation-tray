@@ -62,7 +62,10 @@ class Module:
     paInputOverflow = 2
     def __init__(self, clock):
         self.audio = Audio(clock)
+        self.on_init = None
     def PyAudio(self):
+        if self.on_init:
+            self.on_init()
         return self.audio
 
 
@@ -237,6 +240,66 @@ class MeetingAudioTests(unittest.TestCase):
         computer = self._read(self.root / "computer.wav")
         np.testing.assert_allclose(computer[:8000], .5, atol=1e-4)
         np.testing.assert_allclose(computer[8000:], .3, atol=1e-4)
+
+    def _run_watchdog(self, recorder, ticks=1, advance=0.0):
+        calls = iter([False] * ticks + [True])
+        def wait(_):
+            self.clock.now += advance
+            return next(calls)
+        with patch.object(recorder._shutdown, "wait", side_effect=wait), patch.object(recorder._stopping, "wait", return_value=False):
+            recorder._watch_loop()
+
+    def test_slow_reopen_during_headset_profile_switch_is_not_a_suspend(self):
+        headphones = self._add_output("Fones de ouvido")
+        with self._patched():
+            recorder = MeetingRecorder(self.root)
+            recorder.start()
+            next(s for s in self.module.audio.streams if s.device == headphones).running = False
+            def slow_init():
+                self.clock.now += 8  # Bluetooth A2DP -> hands-free switch
+            self.module.on_init = slow_init
+            self._run_watchdog(recorder, ticks=3, advance=.5)
+            self.module.on_init = None
+            self.assertIsNone(recorder.error)
+            self._feed_device(headphones, 8.6, .5, 1600)
+            self.assertIsNone(recorder.error)
+            recorder.stop()
+
+    def test_reopen_retries_while_endpoints_briefly_disappear(self):
+        headphones = self._add_output("Fones de ouvido")
+        with self._patched():
+            recorder = MeetingRecorder(self.root)
+            recorder.start()
+            next(s for s in self.module.audio.streams if s.device == headphones).running = False
+            devices = self.module.audio.devices
+            saved = list(devices)
+            failures = iter([True, True, False])
+            def flaky_init():
+                devices[:] = [d for d in saved if not d.get("isLoopbackDevice")] if next(failures) else saved
+            self.module.on_init = flaky_init
+            self._run_watchdog(recorder)
+            self.module.on_init = None
+            self.assertIsNone(recorder.error)
+            self.assertTrue(any(s.running and s.device == headphones for s in self.module.audio.streams))
+            self.clock.now += .1
+            recorder.stop()
+
+    def test_outputs_mirroring_the_same_audio_are_not_doubled(self):
+        mirror = self._add_output("CABLE Input (VB-Audio Virtual Cable)")
+        envelope = np.repeat(np.array([.1, .5, .2, .6, .3, .05, .4, .25, .55, .15]), 800)
+        with self._patched():
+            recorder = MeetingRecorder(self.root)
+            recorder.start()
+            for device in (2, mirror):
+                stream = [s for s in self.module.audio.streams if s.device == device][-1]
+                for first in range(0, 16000, 8000):
+                    block = envelope[first // 2:first // 2 + 8000] if first < 8000 else envelope[:8000]
+                    data = block.astype("<f4").tobytes()
+                    stream.callback(data, 8000, {"input_buffer_adc_time": 100 + first / 16000, "current_time": 100 + first / 16000 + .5}, 0)
+            self.clock.now = 101
+            recorder.stop()
+        computer = self._read(self.root / "computer.wav")
+        self.assertLess(float(np.max(np.abs(computer))), .61)
 
     def test_selected_output_records_only_that_device(self):
         headphones = self._add_output("Fones de ouvido")

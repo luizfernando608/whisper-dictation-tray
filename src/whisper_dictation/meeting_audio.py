@@ -132,6 +132,8 @@ class MeetingRecorder:
         self._source_info = {}
         self._levels = {}
         self._level_times = {}
+        self._channels_used = {}
+        self._stopping = threading.Event()
         self._endpoints = None
         self._reopens = []
         self._error = None
@@ -308,7 +310,9 @@ class MeetingRecorder:
                     samples = np.frombuffer(data, dtype="<f4").reshape(-1, channels)
                     if channels > 2:
                         # Stereo calls played on a 6/8-channel output leave most channels silent.
-                        used = np.any(samples != 0, axis=0)
+                        # The set only grows, so the downmix gain does not jump between blocks.
+                        used = self._channels_used.get(source, np.zeros(channels, dtype=bool)) | np.any(samples != 0, axis=0)
+                        self._channels_used[source] = used
                         samples = samples[:, used] if used.any() else samples
                     mono = samples.mean(axis=1)
                     if not np.isfinite(mono).all():
@@ -354,13 +358,13 @@ class MeetingRecorder:
                         if source not in raw:
                             raw[source] = stack.enter_context((self.directory / f"{source}.pcm").open("wb"))
                             journals[source] = stack.enter_context((self.directory / f"{source}.jsonl").open("w", encoding="utf-8"))
-                        if data is None:
-                            continue
-                        offset = raw[source].tell()
-                        raw[source].write(data)
-                        raw[source].flush()
-                        journals[source].write(json.dumps(dict(offset=offset, frames=len(data) // 4, start=timestamp)) + "\n")
-                        journals[source].flush()
+                            previous = 0.0  # list the new journal in capture.json right away for crash recovery
+                        if data is not None:
+                            offset = raw[source].tell()
+                            raw[source].write(data)
+                            raw[source].flush()
+                            journals[source].write(json.dumps(dict(offset=offset, frames=len(data) // 4, start=timestamp)) + "\n")
+                            journals[source].flush()
                     if time.monotonic() - previous >= 1:
                         for name in raw:
                             os.fsync(raw[name].fileno())
@@ -400,10 +404,13 @@ class MeetingRecorder:
                 last_scan = now
                 endpoints = _render_endpoints()
                 reopen = endpoints is not None and endpoints != self._endpoints
-            if reopen and not self._reopen():
-                return
+            if reopen:
+                if not self._reopen():
+                    return
+                # Reopening may take seconds (Bluetooth profile switch); that is not a suspend.
+                previous = time.monotonic()
 
-    def _reopen(self) -> bool:
+    def _reopen(self, attempts=(0.5, 1, 2, 4, 8)) -> bool:
         if not self._stop_lock.acquire(blocking=False):
             return True  # stop() is closing the devices
         try:
@@ -411,24 +418,33 @@ class MeetingRecorder:
                 if not self._active or self._error:
                     return True
                 now = time.monotonic()
-                self._reopens = [moment for moment in self._reopens if now - moment < 60] + [now]
-                if len(self._reopens) > 6:
-                    self._set_error("Dispositivos de áudio instáveis; áudio salvo será recuperado.")
-                    return False
+                self._reopens = [moment for moment in self._reopens if now - moment < 60]
+                if len(self._reopens) >= 6:
+                    return True  # flapping device: try again on a later tick
+                self._reopens.append(now)
             self.logger.info("Dispositivos de áudio mudaram; reabrindo a captura da reunião.")
             self._close_streams()
-            try:
-                self._audio = self._module.PyAudio()
-                started = self._open_streams()
-                self._endpoints = _render_endpoints()
-                for stream in started:
-                    stream.start_stream()
-            except Exception as exc:
-                self._set_error(f"Dispositivo de áudio indisponível: {exc}")
-                return False
-            with self._lock:
-                # The short gap while reopening is kept as silence, not reported as a stall.
-                self._last_callback_time = time.monotonic()
+            for delay in (*attempts, None):
+                try:
+                    self._audio = self._module.PyAudio()
+                    started = self._open_streams()
+                    endpoints = _render_endpoints()
+                    with self._lock:
+                        # The gap while reopening is kept as silence, not reported as a stall.
+                        self._last_callback_time = time.monotonic()
+                    for stream in started:
+                        stream.start_stream()
+                    self._endpoints = endpoints
+                    break
+                except Exception as exc:
+                    self._close_streams()
+                    # Endpoints vanish for a moment while a headset switches profile: retry.
+                    if delay is None:
+                        self._set_error(f"Dispositivo de áudio indisponível: {exc}", end=self._last_safe_capture_end)
+                        return False
+                    self.logger.warning("Reabertura da captura falhou (%s); nova tentativa em %s s.", exc, delay)
+                    if self._stopping.wait(delay):
+                        return True
             self.logger.info("Captura da reunião: %s", ", ".join(info["name"] for key, info in self._source_info.items() if key in self._streams))
             return True
         finally:
@@ -451,6 +467,7 @@ class MeetingRecorder:
             self._audio = None
 
     def stop(self) -> Path:
+        self._stopping.set()  # ends a reopen retry wait instead of blocking the user
         with self._stop_lock:
             with self._lock:
                 if not self._epoch:
@@ -552,6 +569,36 @@ class _SourceReader:
         return result
 
 
+def _rms(samples) -> float:
+    return float(np.sqrt(np.mean(samples * samples))) if len(samples) else 0.0
+
+
+def _envelope(samples, size=320):
+    count = len(samples) // size  # 20 ms frames tolerate the latency between mirrored devices
+    return np.sqrt(np.mean(samples[:count * size].reshape(count, size) ** 2, axis=1))
+
+
+def _mirrors(a, b) -> bool:
+    first, second = _envelope(a), _envelope(b)
+    if len(first) < 10 or not first.std() or not second.std():
+        return False
+    return float(np.corrcoef(first, second)[0, 1]) > .9
+
+
+def _mix_devices(blocks):
+    """Sum distinct devices, keeping one copy of outputs that mirror each other.
+
+    Virtual cables and mixers (Voicemeeter, VB-Cable, "Listen to this device") replay
+    the real output; summing both copies would double the level and add echo.
+    """
+    loud = sorted((block for block in blocks if _rms(block) > 1e-4), key=_rms, reverse=True)
+    kept = []
+    for block in loud:
+        if not any(_mirrors(block, other) for other in kept):
+            kept.append(block)
+    return sum(kept) if kept else blocks[0]
+
+
 def recover_recording(directory: Path | str) -> Path:
     """Finalize persisted chunks, ignoring a torn last journal record after a crash."""
     directory = Path(directory)
@@ -593,7 +640,7 @@ def recover_recording(directory: Path | str) -> Path:
             mixed = np.zeros(length, dtype=np.float32)
             for group, members in groups.items():
                 # Devices of one track (every output, or a microphone swapped mid-meeting) are summed.
-                samples = sum(readers[name].block(first, length) for name in members)
+                samples = _mix_devices([readers[name].block(first, length) for name in members])
                 outputs[group].writeframesraw((np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes())
                 mixed += samples
             # Preserve headroom when both sources speak simultaneously.

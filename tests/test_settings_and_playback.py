@@ -16,11 +16,16 @@ from whisper_dictation.wav_reader import PCM16Reader
 
 
 class SettingsAndPlaybackTests(unittest.TestCase):
-    def test_unlimited_default_preserves_explicit_old_limits_after_upgrade(self):
+    def test_unlimited_default_replaces_legacy_default_limits_but_keeps_new_choices(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "config.json"
             self.assertEqual(AppConfig.load(path).max_record_seconds, 0)
-            path.write_text(json.dumps({"max_record_seconds": 120}), encoding="utf-8")
+            for legacy in (120, 1800):
+                path.write_text(json.dumps({"max_record_seconds": legacy}), encoding="utf-8")
+                self.assertEqual(AppConfig.load(path).max_record_seconds, 0)
+            path.write_text(json.dumps({"max_record_seconds": 300}), encoding="utf-8")
+            self.assertEqual(AppConfig.load(path).max_record_seconds, 300)
+            AppConfig(max_record_seconds=120).save(path)
             self.assertEqual(AppConfig.load(path).max_record_seconds, 120)
             path.write_text(json.dumps({"max_record_seconds": 0}), encoding="utf-8")
             saved = AppConfig.load(path)

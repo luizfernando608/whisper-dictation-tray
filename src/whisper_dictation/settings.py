@@ -9,6 +9,11 @@ from typing import Any
 
 from whisper_dictation.providers import PROVIDERS
 
+# 2: dictation limit defaults of older releases (120 s before 1.4, 1800 s in 1.4) are not
+# user choices; configs saved before this version drop them for the unlimited default.
+CONFIG_VERSION = 2
+_LEGACY_RECORD_LIMITS = {120, 1800}
+
 
 @dataclass(slots=True)
 class AppConfig:
@@ -44,6 +49,7 @@ class AppConfig:
     diarization_num_speakers: int = 0
     diarization_min_speakers: int = 0
     diarization_max_speakers: int = 0
+    config_version: int = CONFIG_VERSION
 
     @classmethod
     def load(cls, path: Path) -> "AppConfig":
@@ -87,6 +93,13 @@ class AppConfig:
         sanitized["sample_rate"] = max(8000, int(sanitized["sample_rate"]))
         raw_max_rec = int(sanitized["max_record_seconds"])
         sanitized["max_record_seconds"] = 0 if raw_max_rec <= 0 else max(5, raw_max_rec)
+        try:
+            saved_version = int(data.get("config_version", 1))
+        except (TypeError, ValueError):
+            saved_version = 1
+        if saved_version < 2 and sanitized["max_record_seconds"] in _LEGACY_RECORD_LIMITS:
+            sanitized["max_record_seconds"] = 0
+        sanitized["config_version"] = CONFIG_VERSION
         sanitized["beam_size"] = max(1, int(sanitized["beam_size"]))
         sanitized["vad_min_silence_ms"] = max(100, int(sanitized["vad_min_silence_ms"]))
         sanitized["typing_interval_ms"] = max(0, int(sanitized["typing_interval_ms"]))
