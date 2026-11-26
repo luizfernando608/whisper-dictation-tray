@@ -3,7 +3,8 @@
 #
 #   scripts\lab\run_lab.ps1 -Candidate Output\Pace_Installer.exe -Next Output\lab\1.6.1\Pace_Installer.exe
 #
-# -Baseline: instalador publicado anterior (padrão: Output\v1.5.2\Pace_Installer.exe, igual ao do GitHub).
+# -Baseline: instalador publicado anterior (padrão: Output\v1.5.2\Pace_Installer.exe, igual ao do GitHub);
+# -BaselineVersion/-CandidateVersion/-NextVersion/-FailingVersion dizem quais versões esses instaladores têm.
 # Resultado: <Output>\report.json, lab.log e evidências (logs de atualização). Código 0 = tudo ok.
 #
 #   scripts\lab\run_lab.ps1 -Public     (após publicar: a versão anterior se atualiza pelo GitHub REAL)
@@ -14,7 +15,14 @@ param(
     [string]$Baseline,
     [string]$Output,
     [int]$TimeoutMinutes = 75,
-    [switch]$KeepOpen
+    [switch]$KeepOpen,
+    # Desliga o Smart App Control só DENTRO da sandbox descartável (instaladores sem assinatura).
+    [switch]$AllowUnsigned,
+    # Versões do roteiro (padrão: 1.5.2 -> 1.6.0 -> 1.6.1, instalador com falha 1.6.2).
+    [string]$BaselineVersion = "1.5.2",
+    [string]$CandidateVersion = "1.6.0",
+    [string]$NextVersion = "1.6.1",
+    [string]$FailingVersion = "1.6.2"
 )
 $ErrorActionPreference = "Stop"
 $Repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
@@ -42,8 +50,11 @@ foreach ($pair in $Installers) {
 }
 Copy-Item (Join-Path $PSScriptRoot "in_sandbox.ps1"), (Join-Path $PSScriptRoot "in_sandbox_public.ps1"), (Join-Path $PSScriptRoot "fake_github.ps1") $Stage
 $Script = if ($Public) { "in_sandbox_public.ps1" } else { "in_sandbox.ps1" }
+[ordered]@{ baseline = $BaselineVersion; candidate = $CandidateVersion; next = $NextVersion; failing = $FailingVersion } |
+    ConvertTo-Json | Set-Content (Join-Path $Stage "versions.json") -Encoding utf8
 Set-Content (Join-Path $Stage "pace-lab.marker") "Pasta do laboratório PACE (somente sandbox)." -Encoding utf8
 if ($KeepOpen) { Set-Content (Join-Path $Stage "keep-open.flag") "1" }
+if ($AllowUnsigned) { Set-Content (Join-Path $Stage "allow-unsigned.flag") "1" }
 
 if (-not $Public) {
 Write-Host "Gerando áudios de teste..." -ForegroundColor Cyan

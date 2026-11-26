@@ -1,3 +1,4 @@
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import tempfile
@@ -16,8 +17,8 @@ class Clock:
 
 
 class Stream:
-    def __init__(self, callback, clock):
-        self.callback, self.clock, self.running = callback, clock, False
+    def __init__(self, callback, clock, device=None):
+        self.callback, self.clock, self.running, self.device = callback, clock, False, device
     def get_time(self):
         return self.clock.now
     def start_stream(self):
@@ -44,9 +45,12 @@ class Audio:
     def get_device_info_by_index(self, index):
         return self.devices[index]
     def get_loopback_device_info_generator(self):
-        return iter([self.devices[2]])
+        return iter([d for d in self.devices if d.get("isLoopbackDevice")])
+    failing = ()
     def open(self, **kwargs):
-        stream = Stream(kwargs["stream_callback"], self.clock)
+        if kwargs["input_device_index"] in self.failing:
+            raise OSError("Invalid device")
+        stream = Stream(kwargs["stream_callback"], self.clock, kwargs["input_device_index"])
         self.streams.append(stream)
         return stream
     def terminate(self):
@@ -61,7 +65,10 @@ class Module:
     paInputOverflow = 2
     def __init__(self, clock):
         self.audio = Audio(clock)
+        self.on_init = None
     def PyAudio(self):
+        if self.on_init:
+            self.on_init()
         return self.audio
 
 
@@ -152,6 +159,180 @@ class MeetingAudioTests(unittest.TestCase):
         self.assertEqual(recorder.error, "Device disconnected")
         self.assertTrue(audio.exists())
         self.assertEqual(json.loads((self.root / "capture.json").read_text())["status"], "interrupted")
+
+    def _add_output(self, name):
+        devices = self.module.audio.devices
+        devices.append(dict(index=len(devices), hostApi=0, name=f"{name} [Loopback]", maxInputChannels=1,
+                            defaultSampleRate=16000, isLoopbackDevice=True))
+        return len(devices) - 1
+
+    def _feed_device(self, device, start, value, length=1600):
+        stream = [s for s in self.module.audio.streams if s.device == device and s.running][-1]
+        data = np.full(length, value, dtype="<f4").tobytes()
+        stream.callback(data, length, {"input_buffer_adc_time": 100 + start, "current_time": 100 + start + length / 16000}, 0)
+
+    def _patched(self, endpoints=None):
+        stack = ExitStack()
+        stack.enter_context(patch("whisper_dictation.meeting_audio._audio_module", return_value=self.module))
+        stack.enter_context(patch("whisper_dictation.meeting_audio.time.monotonic", side_effect=lambda: self.clock.now))
+        stack.enter_context(patch("whisper_dictation.meeting_audio._render_endpoints", side_effect=lambda: endpoints[0] if endpoints else None))
+        return stack
+
+    def test_audio_played_on_headphones_is_recorded_when_speakers_are_the_default(self):
+        headphones = self._add_output("Fones de ouvido")
+        with self._patched():
+            recorder = MeetingRecorder(self.root)
+            recorder.start()
+            for start in (0, .5):
+                self._feed_device(0, start, .2, 8000)
+                self._feed_device(headphones, start, .6, 8000)
+            self.clock.now = 100.5
+            self.assertAlmostEqual(recorder.levels["computer"], .6, places=4)
+            self.clock.now = 101
+            audio = recorder.stop()
+        np.testing.assert_allclose(self._read(self.root / "computer.wav"), .6, atol=1e-4)
+        np.testing.assert_allclose(self._read(self.root / "microphone.wav"), .2, atol=1e-4)
+        np.testing.assert_allclose(self._read(audio), .4, atol=1e-4)
+
+    def test_headset_connected_mid_meeting_is_captured_after_reopening(self):
+        endpoints = [frozenset({"speakers"})]
+        with self._patched(endpoints):
+            recorder = MeetingRecorder(self.root)
+            recorder.start()
+            self._feed_device(0, 0, .2, 8000)
+            self._feed_device(2, 0, .4, 8000)
+            headset = self._add_output("Headset (Hands-Free)")
+            endpoints[0] = frozenset({"speakers", "headset"})
+            self.clock.now = 100.5
+            calls = iter([False, True])
+            def wait(_):
+                self.clock.now += 2.1  # next device scan is due
+                return next(calls)
+            with patch.object(recorder._shutdown, "wait", side_effect=wait):
+                recorder._watch_loop()
+            self.assertIsNone(recorder.error)
+            self._feed_device(0, .5, .2, 8000)
+            self._feed_device(headset, .5, .8, 8000)
+            self.clock.now = 105
+            audio = recorder.stop()
+        capture = json.loads((self.root / "capture.json").read_text())
+        self.assertEqual(set(capture["sources"]), {"microphone", "computer", "computer.1"})
+        computer = self._read(self.root / "computer.wav")
+        np.testing.assert_allclose(computer[:8000], .4, atol=1e-4)
+        np.testing.assert_allclose(computer[8000:16000], .8, atol=1e-4)
+        np.testing.assert_allclose(self._read(self.root / "microphone.wav")[:16000], .2, atol=1e-4)
+        self.assertTrue(audio.exists())
+
+    def test_disconnected_headset_reopens_remaining_outputs_instead_of_ending_meeting(self):
+        headphones = self._add_output("Fones de ouvido")
+        with self._patched():
+            recorder = MeetingRecorder(self.root)
+            recorder.start()
+            self._feed_device(headphones, 0, .5, 8000)
+            next(s for s in self.module.audio.streams if s.device == headphones).running = False
+            del self.module.audio.devices[headphones]
+            self.clock.now = 100.6
+            calls = iter([False, True])
+            with patch.object(recorder._shutdown, "wait", side_effect=lambda _: next(calls)):
+                recorder._watch_loop()
+            self.assertIsNone(recorder.error)
+            self.assertTrue(recorder.active)
+            self._feed_device(2, .5, .3, 8000)
+            self.clock.now = 101
+            recorder.stop()
+        computer = self._read(self.root / "computer.wav")
+        np.testing.assert_allclose(computer[:8000], .5, atol=1e-4)
+        np.testing.assert_allclose(computer[8000:], .3, atol=1e-4)
+
+    def _run_watchdog(self, recorder, ticks=1, advance=0.0):
+        calls = iter([False] * ticks + [True])
+        def wait(_):
+            self.clock.now += advance
+            return next(calls)
+        with patch.object(recorder._shutdown, "wait", side_effect=wait), patch.object(recorder._stopping, "wait", return_value=False):
+            recorder._watch_loop()
+
+    def test_slow_reopen_during_headset_profile_switch_is_not_a_suspend(self):
+        headphones = self._add_output("Fones de ouvido")
+        with self._patched():
+            recorder = MeetingRecorder(self.root)
+            recorder.start()
+            next(s for s in self.module.audio.streams if s.device == headphones).running = False
+            def slow_init():
+                self.clock.now += 8  # Bluetooth A2DP -> hands-free switch
+            self.module.on_init = slow_init
+            self._run_watchdog(recorder, ticks=3, advance=.5)
+            self.module.on_init = None
+            self.assertIsNone(recorder.error)
+            self._feed_device(headphones, 8.6, .5, 1600)
+            self.assertIsNone(recorder.error)
+            recorder.stop()
+
+    def test_reopen_retries_while_endpoints_briefly_disappear(self):
+        headphones = self._add_output("Fones de ouvido")
+        with self._patched():
+            recorder = MeetingRecorder(self.root)
+            recorder.start()
+            next(s for s in self.module.audio.streams if s.device == headphones).running = False
+            devices = self.module.audio.devices
+            saved = list(devices)
+            failures = iter([True, True, False])
+            def flaky_init():
+                devices[:] = [d for d in saved if not d.get("isLoopbackDevice")] if next(failures) else saved
+            self.module.on_init = flaky_init
+            self._run_watchdog(recorder)
+            self.module.on_init = None
+            self.assertIsNone(recorder.error)
+            self.assertTrue(any(s.running and s.device == headphones for s in self.module.audio.streams))
+            self.clock.now += .1
+            recorder.stop()
+
+    def test_output_that_failed_to_open_is_retried_later(self):
+        headset = self._add_output("Headset (Hands-Free)")
+        self.module.audio.failing = (headset,)
+        with self._patched():
+            recorder = MeetingRecorder(self.root)
+            recorder.start()
+            self.assertFalse(any(s.device == headset for s in self.module.audio.streams))
+            self.module.audio.failing = ()
+            calls = iter([False] * 22 + [True])
+            def wait(_):
+                self.clock.now += .5
+                recorder._last_callback_time = self.clock.now  # the microphone keeps delivering audio
+                return next(calls)
+            with patch.object(recorder._shutdown, "wait", side_effect=wait):
+                recorder._watch_loop()
+            self.assertIsNone(recorder.error)
+            self.assertTrue(any(s.running and s.device == headset for s in self.module.audio.streams))
+            self.assertIsNone(recorder._retry_at)
+            self.clock.now += .1
+            recorder.stop()
+
+    def test_outputs_mirroring_the_same_audio_are_not_doubled(self):
+        mirror = self._add_output("CABLE Input (VB-Audio Virtual Cable)")
+        envelope = np.repeat(np.array([.1, .5, .2, .6, .3, .05, .4, .25, .55, .15]), 800)
+        with self._patched():
+            recorder = MeetingRecorder(self.root)
+            recorder.start()
+            for device in (2, mirror):
+                stream = [s for s in self.module.audio.streams if s.device == device][-1]
+                for first in range(0, 16000, 8000):
+                    block = envelope[first // 2:first // 2 + 8000] if first < 8000 else envelope[:8000]
+                    data = block.astype("<f4").tobytes()
+                    stream.callback(data, 8000, {"input_buffer_adc_time": 100 + first / 16000, "current_time": 100 + first / 16000 + .5}, 0)
+            self.clock.now = 101
+            recorder.stop()
+        computer = self._read(self.root / "computer.wav")
+        self.assertLess(float(np.max(np.abs(computer))), .61)
+
+    def test_selected_output_records_only_that_device(self):
+        headphones = self._add_output("Fones de ouvido")
+        with self._patched():
+            recorder = MeetingRecorder(self.root, output_device="Fones de ouvido [Loopback]")
+            recorder.start()
+            self.assertEqual([s.device for s in self.module.audio.streams], [0, headphones])
+            self.clock.now = 100.1
+            recorder.stop()
 
     def test_continuous_resampling_has_no_zero_gaps_between_1024_frame_blocks(self):
         samples = (.8 * np.sin(np.arange(48000) * 2 * np.pi * 440 / 48000)).astype("<f4")

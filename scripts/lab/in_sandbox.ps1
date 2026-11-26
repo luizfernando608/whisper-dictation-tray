@@ -1,7 +1,8 @@
 ﻿# Roteiro do laboratório, executado DENTRO da Windows Sandbox (Windows limpo e descartável).
 # C:\lab (somente leitura): instaladores, fixtures, modelos, scripts. C:\results (gravável): relatório.
-# Cenários: 1.5.2 publicada -> 1.6.0 pela atualização automática real; agentes; MCP; transcrição;
-# 1.6.0 -> 1.6.1-teste com servidor MCP aberto; rollback com instalador que falha; desinstalação.
+# Cenários (versões em C:\lab\versions.json; padrão 1.5.2 -> 1.6.0 -> 1.6.1 -> falha 1.6.2): instalação limpa do
+# candidato; versão publicada (baseline) -> candidato pela atualização automática real; agentes (inclui Antigravity);
+# MCP; transcrição; candidato -> próxima versão de teste com servidor MCP aberto; rollback; desinstalação.
 param([string]$Lab = "C:\lab", [string]$Results = "C:\results")
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
@@ -19,6 +20,12 @@ if ($env:USERNAME -ne "WDAGUtilityAccount" -or -not (Test-Path (Join-Path $Lab "
     Write-Error $reason
     exit 3
 }
+$Versions = [ordered]@{ baseline = "1.5.2"; candidate = "1.6.0"; next = "1.6.1"; failing = "1.6.2" }
+if (Test-Path (Join-Path $Lab "versions.json")) {
+    $custom = Get-Content -Raw -Encoding utf8 (Join-Path $Lab "versions.json") | ConvertFrom-Json
+    foreach ($key in @($Versions.Keys)) { if ($custom.$key) { $Versions[$key] = [string]$custom.$key } }
+}
+$VBase, $VCand, $VNext, $VFail = $Versions.baseline, $Versions.candidate, $Versions.next, $Versions.failing
 $Run = "C:\labrun"
 New-Item -ItemType Directory -Force $Run, $Results | Out-Null
 $App = Join-Path $env:LOCALAPPDATA "Pace"
@@ -143,6 +150,12 @@ function Mcp([Diagnostics.Process]$Process, [string]$Json, [int]$Seconds = 60) {
 }
 
 try {
+    if (Test-Path "$Lab\allow-unsigned.flag") {
+        # Só dentro da sandbox descartável: os instaladores de teste não têm assinatura.
+        Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy" -Name VerifiedAndReputablePolicyState -Value 0 -Type DWord
+        & CiTool.exe --refresh --json | Out-Null
+        Log "Smart App Control desligado na sandbox (-AllowUnsigned; CiTool exit $LASTEXITCODE)"
+    }
     Log "== preparação: GitHub falso (certificado de teste + hosts)"
     $cert = New-SelfSignedCertificate -DnsName "api.github.com", "github.com" -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddDays(2)
     Export-Certificate -Cert $cert -FilePath "$Run\fake.cer" | Out-Null
@@ -150,19 +163,35 @@ try {
     & netsh http add sslcert ipport=0.0.0.0:443 certhash=$($cert.Thumbprint) appid="{8c8b6e4e-1a7c-4a4e-9a5f-5ace0000a6e1}" | Out-Null
     Add-Content -Path "$env:windir\System32\drivers\etc\hosts" -Value "`n127.0.0.1 api.github.com`n127.0.0.1 github.com" -Encoding ascii
     & ipconfig /flushdns | Out-Null
-    Serve "v1.6.0" "$Lab\candidate\Pace_Installer.exe"
+    Serve "v$VCand" "$Lab\candidate\Pace_Installer.exe"
     Start-Process powershell -WindowStyle Hidden -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "$Lab\fake_github.ps1", "-State", "$Run\release.json"
     Check "GitHub falso responde com TLS confiável" {
-        Wait-Until { (Invoke-RestMethod "https://api.github.com/repos/luizfernando608/whisper-dictation-tray/releases/latest").tag_name -eq "v1.6.0" } 30 "servidor"
-        "v1.6.0"
+        Wait-Until { (Invoke-RestMethod "https://api.github.com/repos/luizfernando608/whisper-dictation-tray/releases/latest").tag_name -eq "v$VCand" } 30 "servidor"
+        "v$VCand"
     }
 
-    Log "== 1. versão publicada 1.5.2 (como no computador de quem já usa)"
-    Check "instala 1.5.2 do zero" { Install "$Lab\baseline\Pace_Installer.exe"; Installed-Version }
-    Check "1.5.2 abre na bandeja" { Start-Tray; Running-Version }
+    Log "== 0. instalação limpa do candidato $VCand"
+    Check "instala $VCand do zero, abre e pace-cli responde" {
+        Install "$Lab\candidate\Pace_Installer.exe"
+        Assert ((Installed-Version) -eq $VCand) "versão instalada: $(Installed-Version)"
+        Start-Tray
+        Assert ((Running-Version) -eq $VCand) "versão em execução: $(Running-Version)"
+        $version = Invoke-PaceCli @("--version")
+        Assert ($version -eq "PACE $VCand") "pace-cli: [$version]"
+        Send-Pace "quit"
+        Wait-Until { -not (Get-Process Pace -ErrorAction SilentlyContinue) } 60 "fechar $VCand"
+        $process = Start-Process (Join-Path $App "unins000.exe") -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
+        Assert ($process.ExitCode -eq 0) "desinstalador retornou $($process.ExitCode)"
+        Wait-Until { -not (Test-Path $Cli) } 120 "arquivos removidos"
+        "$VCand instalada, aberta e removida"
+    }
+
+    Log "== 1. versão publicada $VBase (como no computador de quem já usa)"
+    Check "instala $VBase (publicada) do zero" { Install "$Lab\baseline\Pace_Installer.exe"; Installed-Version }
+    Check "$VBase abre na bandeja" { Start-Tray; Running-Version }
     Check "dados do usuário semeados" {
         Send-Pace "quit"
-        Wait-Until { -not (Get-Process Pace -ErrorAction SilentlyContinue) } 60 "fechar 1.5.2"
+        Wait-Until { -not (Get-Process Pace -ErrorAction SilentlyContinue) } 60 "fechar $VBase"
         $config = Get-Content -Raw (Join-Path $App "config.json") | ConvertFrom-Json
         $config.language = "pt"
         $config | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $App "config.json") -Encoding utf8
@@ -173,25 +202,25 @@ try {
         $script:Fingerprint
     }
 
-    Log "== 2. atualização automática real: 1.5.2 -> 1.6.0"
-    Check "1.5.2 atualiza sozinha para 1.6.0 pelo fluxo do app" {
+    Log "== 2. atualização automática real: $VBase -> $VCand"
+    Check "$VBase atualiza sozinha para $VCand pelo fluxo do app" {
         Start-Tray
-        Request-Update "1.6.0"
-        Wait-Until { (Installed-Version) -eq "1.6.0" -and (Running-Version) -eq "1.6.0" } 600 "1.6.0 instalada e confirmada"
+        Request-Update $VCand
+        Wait-Until { (Installed-Version) -eq $VCand -and (Running-Version) -eq $VCand } 600 "$VCand instalada e confirmada"
         # O auxiliar grava result.json logo depois de ver a confirmação da nova versão.
         Wait-Until { (Last-UpdateResult).status -eq "updated" } 60 "resultado do auxiliar"
         $result = Last-UpdateResult
         Assert ($result.status -eq "updated") "resultado do auxiliar: $($result | ConvertTo-Json -Compress)"
-        "1.6.0 confirmada"
+        "$VCand confirmada"
     }
-    Check "dados, chave e configurações preservados (1.5.2 -> 1.6.0)" {
+    Check "dados, chave e configurações preservados ($VBase -> $VCand)" {
         $now = Data-Fingerprint
         Assert ($now -eq $script:Fingerprint) "antes $script:Fingerprint, depois $now"
         "iguais"
     }
     Check "pace-cli instalado e funcional" {
         $version = Invoke-PaceCli @("--version")
-        Assert ($version -eq "PACE 1.6.0") "versão: [$version] stderr: $script:CliErr"
+        Assert ($version -eq "PACE $VCand") "versão: [$version] stderr: $script:CliErr"
         $doctor = Invoke-PaceCli @("doctor", "--json") | ConvertFrom-Json
         Assert ($doctor.api_key_configured -eq $true) "chave não encontrada após a atualização"
         "doctor ok, chave detectada (sem exibir)"
@@ -199,7 +228,8 @@ try {
 
     Log "== 3. agentes de IA (perfis falsos dentro da sandbox)"
     Check "conectar aos agentes instala MCP e skill" {
-        New-Item -ItemType Directory -Force "$HOME\.claude", "$HOME\.codex", "$env:APPDATA\Claude" | Out-Null
+        New-Item -ItemType Directory -Force "$HOME\.claude", "$HOME\.codex", "$env:APPDATA\Claude", "$HOME\.gemini\antigravity" | Out-Null
+        [IO.File]::WriteAllBytes("$HOME\.gemini\antigravity\mcp_config.json", [byte[]]@())  # o Antigravity cria esse arquivo vazio
         Set-Content "$HOME\.claude.json" '{"numStartups": 1}' -Encoding ascii
         Set-Content "$HOME\.codex\config.toml" "model = `"gpt-5`"`n" -Encoding ascii
         Set-Content "$env:APPDATA\Claude\claude_desktop_config.json" '{"preferences": {"laboratorio": true}}' -Encoding ascii
@@ -209,13 +239,18 @@ try {
         Assert ($claude.mcpServers.pace.command -eq $Cli) "Claude Code sem o PACE"
         Assert ((Get-Content -Raw "$HOME\.codex\config.toml") -match "mcp_servers\.pace") "Codex sem o PACE"
         Assert (Test-Path "$HOME\.claude\skills\pace-transcricao\SKILL.md") "skill ausente"
+        $gemini = Get-Content -Raw "$HOME\.gemini\config\mcp_config.json" | ConvertFrom-Json
+        Assert ($gemini.mcpServers.pace.command -eq $Cli) "Antigravity (config) sem o PACE"
+        $legacy = Get-Content -Raw "$HOME\.gemini\antigravity\mcp_config.json" | ConvertFrom-Json
+        Assert ($legacy.mcpServers.pace.command -eq $Cli) "Antigravity (legado) sem o PACE"
+        Assert (Test-Path "$HOME\.gemini\config\skills\pace-transcricao\SKILL.md") "skill do Antigravity ausente"
         $script:AgentsConnected = $true
         ($report.PSObject.Properties.Name -join ",")
     }
     Check "servidor MCP: handshake, ferramentas e diagnóstico" {
         $script:Mcp = Start-McpServer
         $init = Mcp $script:Mcp '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
-        Assert ($init.result.serverInfo.version -eq "1.6.0") "resposta MCP inesperada: [$script:McpRaw]"
+        Assert ($init.result.serverInfo.version -eq $VCand) "resposta MCP inesperada: [$script:McpRaw]"
         $tools = Mcp $script:Mcp '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
         $status = Mcp $script:Mcp '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"pace_status","arguments":{}}}' 120
         Assert (-not $status.result.isError) "pace_status falhou: $($status.result.content[0].text)"
@@ -248,48 +283,48 @@ try {
         $list[0].id
     }
 
-    Log "== 5. 1.6.0 -> 1.6.1-teste com servidor MCP de agente aberto"
-    Check "1.6.0 atualiza para 1.6.1 mesmo com MCP aberto" {
+    Log "== 5. $VCand -> $VNext-teste com servidor MCP de agente aberto"
+    Check "$VCand atualiza para $VNext mesmo com MCP aberto" {
         Assert (-not $script:Mcp.HasExited) "servidor MCP já tinha fechado"
-        Serve "v1.6.1" "$Lab\next\Pace_Installer.exe"
-        Request-Update "1.6.1"
-        Wait-Until { (Installed-Version) -eq "1.6.1" -and (Running-Version) -eq "1.6.1" } 600 "1.6.1 instalada e confirmada"
-        Wait-Until { (Last-UpdateResult).version -eq "1.6.1" } 60 "resultado do auxiliar"
+        Serve "v$VNext" "$Lab\next\Pace_Installer.exe"
+        Request-Update $VNext
+        Wait-Until { (Installed-Version) -eq $VNext -and (Running-Version) -eq $VNext } 600 "$VNext instalada e confirmada"
+        Wait-Until { (Last-UpdateResult).version -eq $VNext } 60 "resultado do auxiliar"
         $result = Last-UpdateResult
         Assert ($result.status -eq "updated") "resultado: $($result | ConvertTo-Json -Compress)"
         Assert ($script:Mcp.HasExited) "o servidor MCP antigo continuou rodando"
-        "1.6.1 confirmada; MCP antigo encerrado pelo auxiliar"
+        "$VNext confirmada; MCP antigo encerrado pelo auxiliar"
     }
-    Check "dados preservados (1.6.0 -> 1.6.1)" {
+    Check "dados preservados ($VCand -> $VNext)" {
         $now = Data-Fingerprint
         Assert ($now -eq $script:Fingerprint) "antes $script:Fingerprint, depois $now"
         $list = Invoke-PaceCli @("list", "--json") | ConvertFrom-Json
         Assert ($list.Count -ge 1) "biblioteca vazia"
         "iguais; biblioteca com $($list.Count) item(ns)"
     }
-    Check "skill e MCP dos agentes atualizados para 1.6.1" {
-        Wait-Until { (Get-Content -Raw "$HOME\.claude\skills\pace-transcricao\SKILL.md") -match "v1\.6\.1" } 60 "skill v1.6.1"
-        Assert ((Invoke-PaceCli @("--version")) -eq "PACE 1.6.1") "pace-cli não é 1.6.1"
+    Check "skill e MCP dos agentes atualizados para $VNext" {
+        Wait-Until { (Get-Content -Raw "$HOME\.claude\skills\pace-transcricao\SKILL.md") -match ("v" + [regex]::Escape($VNext)) } 60 "skill v$VNext"
+        Assert ((Invoke-PaceCli @("--version")) -eq "PACE $VNext") "pace-cli não é $VNext"
         $server = Start-McpServer
         $init = Mcp $server '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
         $server.Kill()
-        Assert ($init.result.serverInfo.version -eq "1.6.1") "resposta MCP inesperada: [$script:McpRaw]"
-        "skill v1.6.1, MCP 1.6.1"
+        Assert ($init.result.serverInfo.version -eq $VNext) "resposta MCP inesperada: [$script:McpRaw]"
+        "skill v$VNext, MCP $VNext"
     }
 
     Log "== 6. rollback: instalador que falha de propósito"
-    Check "falha na instalação volta para 1.6.1 funcionando" {
+    Check "falha na instalação volta para $VNext funcionando" {
         Copy-Item "$Lab\abort\Pace_Failure_Installer.exe" "$Run\Pace_Installer.exe" -Force
-        Serve "v1.6.2" "$Run\Pace_Installer.exe"
+        Serve "v$VFail" "$Run\Pace_Installer.exe"
         $before = @(Get-ChildItem (Join-Path $Data "updates\runs\*\result.json") -ErrorAction SilentlyContinue).Count
-        Request-Update "1.6.2"
+        Request-Update $VFail
         Wait-Until { @(Get-ChildItem (Join-Path $Data "updates\runs\*\result.json") -ErrorAction SilentlyContinue).Count -gt $before } 300 "resultado da tentativa"
         Assert ((Last-UpdateResult).status -eq "failed") "esperava falha"
         $updateLog = Get-ChildItem (Join-Path $Data "updates\runs\*\update.log") | Sort-Object LastWriteTime | Select-Object -Last 1
         # Só conta como rollback se o auxiliar chegou a restaurar os binários (falha antes disso não testa nada).
         Assert ((Get-Content -Raw -Encoding utf8 $updateLog.FullName) -match "Binários anteriores restaurados") "o auxiliar não restaurou os binários"
-        Wait-Until { (Running-Version) -eq "1.6.1" } 120 "1.6.1 reaberta"
-        Assert ((Invoke-PaceCli @("--version")) -eq "PACE 1.6.1") "pace-cli quebrado após rollback"
+        Wait-Until { (Running-Version) -eq $VNext } 120 "$VNext reaberta"
+        Assert ((Invoke-PaceCli @("--version")) -eq "PACE $VNext") "pace-cli quebrado após rollback"
         Assert ((Data-Fingerprint) -eq $script:Fingerprint) "dados mudaram no rollback"
         "rollback ok; pace-cli e dados intactos"
     }
@@ -309,6 +344,9 @@ try {
         Assert (-not $desktop.mcpServers.pace) "entrada do PACE ficou no Claude Desktop"
         Assert ($desktop.preferences.laboratorio -eq $true) "config do Claude Desktop perdeu dados"
         Assert (-not (Test-Path "$HOME\.claude\skills\pace-transcricao")) "skill ficou"
+        $gemini = Get-Content -Raw "$HOME\.gemini\config\mcp_config.json" | ConvertFrom-Json
+        Assert (-not $gemini.mcpServers.pace) "entrada do PACE ficou no Antigravity"
+        Assert (-not (Test-Path "$HOME\.gemini\config\skills\pace-transcricao")) "skill do Antigravity ficou"
         Assert (-not ((Get-Content -Raw "$HOME\.codex\config.toml") -match "mcp_servers\.pace")) "Codex ficou com o PACE"
         Assert ((Get-Content -Raw "$HOME\.codex\config.toml") -match "gpt-5") "config do Codex perdeu dados"
         "código de saída $($process.ExitCode)"
