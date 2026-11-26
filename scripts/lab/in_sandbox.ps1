@@ -150,6 +150,12 @@ function Mcp([Diagnostics.Process]$Process, [string]$Json, [int]$Seconds = 60) {
 }
 
 try {
+    if (Test-Path "$Lab\allow-unsigned.flag") {
+        # Só dentro da sandbox descartável: os instaladores de teste não têm assinatura.
+        Set-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy" -Name VerifiedAndReputablePolicyState -Value 0 -Type DWord
+        & CiTool.exe --refresh --json | Out-Null
+        Log "Smart App Control desligado na sandbox (-AllowUnsigned; CiTool exit $LASTEXITCODE)"
+    }
     Log "== preparação: GitHub falso (certificado de teste + hosts)"
     $cert = New-SelfSignedCertificate -DnsName "api.github.com", "github.com" -CertStoreLocation Cert:\LocalMachine\My -NotAfter (Get-Date).AddDays(2)
     Export-Certificate -Cert $cert -FilePath "$Run\fake.cer" | Out-Null

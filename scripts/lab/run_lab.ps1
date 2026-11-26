@@ -16,6 +16,8 @@ param(
     [string]$Output,
     [int]$TimeoutMinutes = 75,
     [switch]$KeepOpen,
+    # Desliga o Smart App Control só DENTRO da sandbox descartável (instaladores sem assinatura).
+    [switch]$AllowUnsigned,
     # Versões do roteiro (padrão: 1.5.2 -> 1.6.0 -> 1.6.1, instalador com falha 1.6.2).
     [string]$BaselineVersion = "1.5.2",
     [string]$CandidateVersion = "1.6.0",
@@ -52,6 +54,7 @@ $Script = if ($Public) { "in_sandbox_public.ps1" } else { "in_sandbox.ps1" }
     ConvertTo-Json | Set-Content (Join-Path $Stage "versions.json") -Encoding utf8
 Set-Content (Join-Path $Stage "pace-lab.marker") "Pasta do laboratório PACE (somente sandbox)." -Encoding utf8
 if ($KeepOpen) { Set-Content (Join-Path $Stage "keep-open.flag") "1" }
+if ($AllowUnsigned) { Set-Content (Join-Path $Stage "allow-unsigned.flag") "1" }
 
 if (-not $Public) {
 Write-Host "Gerando áudios de teste..." -ForegroundColor Cyan
