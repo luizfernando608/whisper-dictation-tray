@@ -24,6 +24,7 @@ RATE = 16000
 SOURCES = ("microphone", "computer")
 _KEY = re.compile(r"^(microphone|computer)(?:\.(\d{1,3}))?$")
 _RENDER_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render"
+_RETRY_DELAYS = (10, 30, 60)  # seconds before reopening a capture that missed an output
 
 
 def _group(key) -> str | None:
@@ -135,6 +136,10 @@ class MeetingRecorder:
         self._channels_used = {}
         self._stopping = threading.Event()
         self._endpoints = None
+        self._listed_outputs = None
+        self._incomplete = False
+        self._retry_at = None
+        self._retry_step = 0
         self._reopens = []
         self._error = None
 
@@ -186,6 +191,7 @@ class MeetingRecorder:
         except Exception:
             default = None
         outputs = sorted(outputs, key=lambda d: d["name"].removesuffix(" [Loopback]") != default)
+        self._listed_outputs = len(outputs)
         return plan + [("computer", device) for device in outputs]
 
     def _key(self, group, device, rate, channels):
@@ -199,8 +205,9 @@ class MeetingRecorder:
             if key not in self._source_info:
                 return key
 
-    def _open_streams(self) -> list:
-        opened = []
+    def _open_streams(self, endpoints=None) -> list:
+        opened, skipped = [], False
+        self._listed_outputs = None
         for group, device in self._stream_plan():
             rate = int(device["defaultSampleRate"])
             # Shared-mode loopback only accepts the output's own layout (monitors and virtual
@@ -216,16 +223,32 @@ class MeetingRecorder:
                 if group == "microphone" or self.output_device is not None:
                     raise
                 self.logger.warning("Saída %s não pôde ser capturada; seguindo com as demais.", device["name"], exc_info=True)
+                skipped = True
                 continue
             with self._lock:
                 self._source_info[key] = dict(rate=rate, channels=channels, name=device["name"],
                                               clock_offset=time.monotonic() - stream.get_time())
                 self._streams[key] = stream
-            self._queue.put((key, None, None))  # writer creates the journal even if the device stays silent
+            # The writer creates the journal even if the device stays silent; a dead writer
+            # must not hang the reopen (and stop(), which waits for it).
+            self._queue.put((key, None, None), timeout=5)
             opened.append(stream)
         if not any(_group(key) == "computer" for key in self._streams):
             raise RuntimeError("Nenhuma saída de áudio pôde ser capturada. Selecione outra saída.")
+        # A just-connected headset may be active in Windows before PortAudio can open it.
+        self._incomplete = self.output_device is None and (skipped or (
+            endpoints is not None and self._listed_outputs is not None and self._listed_outputs < len(endpoints)))
         return opened
+
+    def _schedule_retry(self, reset: bool) -> None:
+        """Retry an incomplete capture a few times without reopening forever."""
+        if reset:
+            self._retry_step = 0
+        if self._incomplete and self._retry_step < len(_RETRY_DELAYS):
+            self._retry_at = time.monotonic() + _RETRY_DELAYS[self._retry_step]
+            self._retry_step += 1
+        else:
+            self._retry_at = None
 
     def start(self) -> None:
         with self._lock:
@@ -239,8 +262,11 @@ class MeetingRecorder:
         self._module = _audio_module()
         self._audio = self._module.PyAudio()
         try:
-            self._open_streams()
-            self._endpoints = _render_endpoints()
+            # Read before opening: a device activated meanwhile triggers one extra reopen.
+            endpoints = _render_endpoints()
+            self._open_streams(endpoints)
+            self._endpoints = endpoints
+            self._schedule_retry(reset=True)
             self._epoch = time.monotonic()
             self._last_callback_time = self._last_safe_capture_end = self._epoch
             self._active = True
@@ -398,19 +424,23 @@ class MeetingRecorder:
                 if self._error:
                     # Finalization is performed by the service, outside PortAudio callback threads.
                     return
-            if not reopen and self.output_device is None and now - last_scan >= 2:
-                # PortAudio lists devices only when initialized: a headset connected
-                # mid-meeting is picked up by reopening the capture.
-                last_scan = now
-                endpoints = _render_endpoints()
-                reopen = endpoints is not None and endpoints != self._endpoints
+            reset = True
+            if not reopen and self.output_device is None:
+                if self._retry_at is not None and now >= self._retry_at:
+                    reopen, reset = True, False  # an output was missed last time
+                elif now - last_scan >= 2:
+                    # PortAudio lists devices only when initialized: a headset connected
+                    # mid-meeting is picked up by reopening the capture.
+                    last_scan = now
+                    endpoints = _render_endpoints()
+                    reopen = endpoints is not None and endpoints != self._endpoints
             if reopen:
-                if not self._reopen():
+                if not self._reopen(reset=reset):
                     return
                 # Reopening may take seconds (Bluetooth profile switch); that is not a suspend.
                 previous = time.monotonic()
 
-    def _reopen(self, attempts=(0.5, 1, 2, 4, 8)) -> bool:
+    def _reopen(self, attempts=(0.5, 1, 2, 4, 8), reset=True) -> bool:
         if not self._stop_lock.acquire(blocking=False):
             return True  # stop() is closing the devices
         try:
@@ -426,15 +456,16 @@ class MeetingRecorder:
             self._close_streams()
             for delay in (*attempts, None):
                 try:
+                    endpoints = _render_endpoints()  # before enumerating, see start()
                     self._audio = self._module.PyAudio()
-                    started = self._open_streams()
-                    endpoints = _render_endpoints()
+                    started = self._open_streams(endpoints)
                     with self._lock:
                         # The gap while reopening is kept as silence, not reported as a stall.
                         self._last_callback_time = time.monotonic()
                     for stream in started:
                         stream.start_stream()
                     self._endpoints = endpoints
+                    self._schedule_retry(reset)
                     break
                 except Exception as exc:
                     self._close_streams()

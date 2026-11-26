@@ -46,7 +46,10 @@ class Audio:
         return self.devices[index]
     def get_loopback_device_info_generator(self):
         return iter([d for d in self.devices if d.get("isLoopbackDevice")])
+    failing = ()
     def open(self, **kwargs):
+        if kwargs["input_device_index"] in self.failing:
+            raise OSError("Invalid device")
         stream = Stream(kwargs["stream_callback"], self.clock, kwargs["input_device_index"])
         self.streams.append(stream)
         return stream
@@ -281,6 +284,27 @@ class MeetingAudioTests(unittest.TestCase):
             self.module.on_init = None
             self.assertIsNone(recorder.error)
             self.assertTrue(any(s.running and s.device == headphones for s in self.module.audio.streams))
+            self.clock.now += .1
+            recorder.stop()
+
+    def test_output_that_failed_to_open_is_retried_later(self):
+        headset = self._add_output("Headset (Hands-Free)")
+        self.module.audio.failing = (headset,)
+        with self._patched():
+            recorder = MeetingRecorder(self.root)
+            recorder.start()
+            self.assertFalse(any(s.device == headset for s in self.module.audio.streams))
+            self.module.audio.failing = ()
+            calls = iter([False] * 22 + [True])
+            def wait(_):
+                self.clock.now += .5
+                recorder._last_callback_time = self.clock.now  # the microphone keeps delivering audio
+                return next(calls)
+            with patch.object(recorder._shutdown, "wait", side_effect=wait):
+                recorder._watch_loop()
+            self.assertIsNone(recorder.error)
+            self.assertTrue(any(s.running and s.device == headset for s in self.module.audio.streams))
+            self.assertIsNone(recorder._retry_at)
             self.clock.now += .1
             recorder.stop()
 
